@@ -24,8 +24,8 @@ before_install:
 script: bundle exec rake spec_travis
 gemfile: .travis.gemfile
 before_script:
-  - createuser -s postgres
   - pg_ctl -D /usr/local/var/postgres start
+  - createuser -s postgres
   - psql -c 'create database sequel_test;' -U postgres
 services:
   - postgresql
