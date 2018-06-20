@@ -128,16 +128,13 @@ task :spec_travis=>[:spec_core, :spec_model, :spec_plugin, :spec_core_ext] do
   if defined?(RUBY_ENGINE) && RUBY_ENGINE == 'jruby'
     ENV['SEQUEL_SQLITE_URL'] = "jdbc:sqlite::memory:"
     ENV['SEQUEL_POSTGRES_URL'] = "jdbc:postgresql://localhost/sequel_test?user=postgres"
-    ENV['SEQUEL_MYSQL_URL'] = "jdbc:mysql://localhost/sequel_test?user=root"
   else
     ENV['SEQUEL_SQLITE_URL'] = "sqlite:/"
     ENV['SEQUEL_POSTGRES_URL'] = "postgres://localhost/sequel_test?user=postgres"
-    ENV['SEQUEL_MYSQL_URL'] = "mysql2://localhost/sequel_test?user=root"
   end
 
   Rake::Task['spec_sqlite'].invoke
   Rake::Task['spec_postgres'].invoke
-  Rake::Task['spec_mysql'].invoke
 end
 
 desc "Print Sequel version"

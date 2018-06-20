@@ -1,7 +1,7 @@
+os: osx
+osx_image: xcode9.4
 language: ruby
 rvm:
-  - 1.9.3
-  - 2.0.0
   - 2.1
   - 2.2
   - 2.3
@@ -24,9 +24,6 @@ before_install:
 script: bundle exec rake spec_travis
 gemfile: .travis.gemfile
 before_script:
-  - mysql -e 'create database sequel_test;'
   - psql -c 'create database sequel_test;' -U postgres
-addons:
-  postgresql: "9.6"
 services:
   - postgresql
