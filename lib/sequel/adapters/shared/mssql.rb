@@ -40,6 +40,12 @@ module Sequel
       # :numrows :: The number of rows affected by the stored procedure
       # output params :: Values for any output paramters, using the name given for the output parameter
       #
+      # Because Sequel datasets only support a single result set per query, and retrieving 
+      # the result code and number of rows requires a query, this does not support
+      # stored procedures which also return result sets.  To handle such stored procedures,
+      # you should drop down to the connection/driver level by using Sequel::Database#synchronize
+      # to get access to the underlying connection object.
+      #
       # Examples:
       #
       #     DB.call_mssql_sproc(:SequelTest, {args: ['input arg', :output]})
@@ -1044,6 +1050,11 @@ module Sequel
           end
           column_list_append(sql, values)
         end
+      end
+
+      # MSSQL does not natively support NULLS FIRST/LAST.
+      def requires_emulating_nulls_first?
+        true
       end
 
       # MSSQL supports 100-nsec precision for time columns, but ruby by

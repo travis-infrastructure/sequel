@@ -633,10 +633,15 @@ module Sequel
             ds = ds.eager(associations)
           end
           if block = eo[:eager_block]
+            orig_ds = ds
             ds = block.call(ds)
           end
           if eager_loading_use_associated_key?
-            ds = ds.select_append(*associated_key_array)
+            ds = if ds.opts[:eager_graph] && !orig_ds.opts[:eager_graph]
+              block.call(orig_ds.select_append(*associated_key_array))
+            else
+              ds.select_append(*associated_key_array)
+            end
           end
           if self[:eager_graph]
             raise(Error, "cannot eagerly load a #{self[:type]} association that uses :eager_graph") if eager_loading_use_associated_key?
@@ -747,8 +752,8 @@ module Sequel
 
         # If +s+ is an array, map +s+ over the block.  Otherwise, just call the
         # block with +s+.
-        def transform(s)
-          s.is_a?(Array) ? s.map(&Proc.new) : (yield s)
+        def transform(s, &block)
+          s.is_a?(Array) ? s.map(&block) : (yield s)
         end
 
         # What eager limit strategy should be used when true is given as the value,
@@ -2401,15 +2406,32 @@ module Sequel
         # cached associations.
         def change_column_value(column, value)
           if assocs = model.autoreloading_associations[column]
+            vals = @values
             if new?
               # Do deeper checking for new objects, so that associations are
               # not deleted when values do not change.  This code is run at
               # a higher level for existing objects.
-              vals = @values
-              return super unless !vals.include?(column) || value != (c = vals[column]) || value.class != c.class
+              if value == (c = vals[column]) && value.class == c.class
+                # If the value is the same, there is no reason to delete
+                # the related associations, so exit early in that case.
+                return super
+              end
+
+              only_delete_nil = c.nil?
+            elsif vals[column].nil?
+              only_delete_nil = true
             end
 
-            assocs.each{|a| associations.delete(a)}
+            if only_delete_nil
+              # If the current foreign key value is nil, but the association
+              # is already present in the cache, it was probably added to the
+              # cache for a reason, and we do not want to delete it in that case.
+              # However, we still want to delete associations with nil values
+              # to remove the cached false negative.
+              assocs.each{|a| associations.delete(a) if associations[a].nil?}
+            else
+              assocs.each{|a| associations.delete(a)}
+            end
           end
           super
         end
@@ -2575,13 +2597,25 @@ module Sequel
         # Set the given object as the associated object for the given *_to_one association reflection
         def _set_associated_object(opts, o)
           a = associations[opts[:name]]
-          return if a && a == o && !set_associated_object_if_same?
+          reciprocal = opts.reciprocal
+          if set_associated_object_if_same?
+            if reciprocal
+              remove_reciprocal = a && (a != o || a.associations[reciprocal] != self)
+              add_reciprocal = o && o.associations[reciprocal] != self
+            end
+          else
+            return if a && a == o
+            if reciprocal
+              remove_reciprocal = a
+              add_reciprocal = o
+            end
+          end
           run_association_callbacks(opts, :before_set, o)
-          remove_reciprocal_object(opts, a) if a
+          remove_reciprocal_object(opts, a) if remove_reciprocal
           # Allow calling private _setter method
           send(opts[:_setter_method], o)
           associations[opts[:name]] = o
-          add_reciprocal_object(opts, o) if o
+          add_reciprocal_object(opts, o) if add_reciprocal
           run_association_callbacks(opts, :after_set, o)
           o
         end
@@ -2636,7 +2670,7 @@ module Sequel
       #   Album.eager(:artist, :genre).all
       #   Album.eager_graph(:artist, :genre).all
       #   Album.eager(:artist).eager(:genre).all
-      #   Album.eager_graph(:artist).eager(:genre).all
+      #   Album.eager_graph(:artist).eager_graph(:genre).all
       #   Artist.eager(albums: :tracks).all
       #   Artist.eager_graph(albums: :tracks).all
       #   Artist.eager(albums: {tracks: :genre}).all
@@ -2669,13 +2703,79 @@ module Sequel
         end
 
         # Adds one or more INNER JOINs to the existing dataset using the keys and conditions
-        # specified by the given association.  The following methods also exist for specifying
-        # a different type of JOIN:
+        # specified by the given association(s).  Take the same arguments as eager_graph, and
+        # operates similarly, but only adds the joins as opposed to making the other changes
+        # (such as adding selected columns and setting up eager loading).
+        #
+        # The following methods also exist for specifying a different type of JOIN:
         #
         # association_full_join :: FULL JOIN
         # association_inner_join :: INNER JOIN
         # association_left_join :: LEFT JOIN
         # association_right_join :: RIGHT JOIN
+        #
+        # Examples:
+        #
+        #   # For each album, association_join load the artist
+        #   Album.association_join(:artist).all
+        #   # SELECT *
+        #   # FROM albums
+        #   # INNER JOIN artists AS artist ON (artists.id = albums.artist_id)
+        #
+        #   # For each album, association_join load the artist, using a specified alias
+        #   Album.association_join(Sequel[:artist].as(:a)).all
+        #   # SELECT *
+        #   # FROM albums
+        #   # INNER JOIN artists AS a ON (a.id = albums.artist_id)
+        #
+        #   # For each album, association_join load the artist and genre
+        #   Album.association_join(:artist, :genre).all
+        #   Album.association_join(:artist).association_join(:genre).all
+        #   # SELECT *
+        #   # FROM albums
+        #   # INNER JOIN artists AS artist ON (artist.id = albums.artist_id)
+        #   # INNER JOIN genres AS genre ON (genre.id = albums.genre_id)
+        #
+        #   # For each artist, association_join load albums and tracks for each album
+        #   Artist.association_join(albums: :tracks).all
+        #   # SELECT *
+        #   # FROM artists 
+        #   # INNER JOIN albums ON (albums.artist_id = artists.id)
+        #   # INNER JOIN tracks ON (tracks.album_id = albums.id)
+        #
+        #   # For each artist, association_join load albums, tracks for each album, and genre for each track
+        #   Artist.association_join(albums: {tracks: :genre}).all
+        #   # SELECT *
+        #   # FROM artists 
+        #   # INNER JOIN albums ON (albums.artist_id = artists.id)
+        #   # INNER JOIN tracks ON (tracks.album_id = albums.id)
+        #   # INNER JOIN genres AS genre ON (genre.id = tracks.genre_id)
+        #
+        #   # For each artist, association_join load albums with year > 1990
+        #   Artist.association_join(albums: proc{|ds| ds.where{year > 1990}}).all
+        #   # SELECT *
+        #   # FROM artists 
+        #   # INNER JOIN (
+        #   #   SELECT * FROM albums WHERE (year > 1990)
+        #   # ) AS albums ON (albums.artist_id = artists.id)
+        #
+        #   # For each artist, association_join load albums and tracks 1-10 for each album
+        #   Artist.association_join(albums: {tracks: proc{|ds| ds.where(number: 1..10)}}).all
+        #   # SELECT *
+        #   # FROM artists 
+        #   # INNER JOIN albums ON (albums.artist_id = artists.id)
+        #   # INNER JOIN (
+        #   #   SELECT * FROM tracks WHERE ((number >= 1) AND (number <= 10))
+        #   # ) AS tracks ON (tracks.albums_id = albums.id)
+        #
+        #   # For each artist, association_join load albums with year > 1990, and tracks for those albums
+        #   Artist.association_join(albums: {proc{|ds| ds.where{year > 1990}}=>:tracks}).all
+        #   # SELECT *
+        #   # FROM artists 
+        #   # INNER JOIN (
+        #   #   SELECT * FROM albums WHERE (year > 1990)
+        #   # ) AS albums ON (albums.artist_id = artists.id)
+        #   # INNER JOIN tracks ON (tracks.album_id = albums.id)
         def association_join(*associations)
           association_inner_join(*associations)
         end
@@ -2755,6 +2855,56 @@ module Sequel
         #
         # Each association's order, if defined, is respected.
         # If the association uses a block or has an :eager_block argument, it is used.
+        #
+        # To modify the associated dataset that will be used for the eager load, you should use a
+        # hash for the association, with the key being the association name symbol, and the value being
+        # a callable object that is called with the associated dataset and should return a modified
+        # dataset.  If that association also has dependent associations, instead of a callable object,
+        # use a hash with the callable object being the key, and the dependent association(s) as the value.
+        #
+        # Examples:
+        #
+        #   # For each album, eager load the artist
+        #   Album.eager(:artist).all
+        #   # SELECT * FROM albums
+        #   # SELECT * FROM artists WHERE (id IN (...))
+        #
+        #   # For each album, eager load the artist and genre
+        #   Album.eager(:artist, :genre).all
+        #   Album.eager(:artist).eager(:genre).all
+        #   # SELECT * FROM albums
+        #   # SELECT * FROM artists WHERE (id IN (...))
+        #   # SELECT * FROM genres WHERE (id IN (...))
+        #
+        #   # For each artist, eager load albums and tracks for each album
+        #   Artist.eager(albums: :tracks).all
+        #   # SELECT * FROM artists
+        #   # SELECT * FROM albums WHERE (artist_id IN (...))
+        #   # SELECT * FROM tracks WHERE (album_id IN (...))
+        #
+        #   # For each artist, eager load albums, tracks for each album, and genre for each track
+        #   Artist.eager(albums: {tracks: :genre}).all
+        #   # SELECT * FROM artists
+        #   # SELECT * FROM albums WHERE (artist_id IN (...))
+        #   # SELECT * FROM tracks WHERE (album_id IN (...))
+        #   # SELECT * FROM genre WHERE (id IN (...))
+        #
+        #   # For each artist, eager load albums with year > 1990
+        #   Artist.eager(albums: proc{|ds| ds.where{year > 1990}}).all
+        #   # SELECT * FROM artists
+        #   # SELECT * FROM albums WHERE ((year > 1990) AND (artist_id IN (...)))
+        #
+        #   # For each artist, eager load albums and tracks 1-10 for each album
+        #   Artist.eager(albums: {tracks: proc{|ds| ds.where(number: 1..10)}}).all
+        #   # SELECT * FROM artists
+        #   # SELECT * FROM albums WHERE (artist_id IN (...))
+        #   # SELECT * FROM tracks WHERE ((number >= 1) AND (number <= 10) AND (album_id IN (...)))
+        #
+        #   # For each artist, eager load albums with year > 1990, and tracks for those albums
+        #   Artist.eager(albums: {proc{|ds| ds.where{year > 1990}}=>:tracks}).all
+        #   # SELECT * FROM artists
+        #   # SELECT * FROM albums WHERE ((year > 1990) AND (artist_id IN (...)))
+        #   # SELECT * FROM albums WHERE (artist_id IN (...))
         def eager(*associations)
           opts = @opts[:eager]
           association_opts = eager_options_for_associations(associations)
@@ -2783,6 +2933,78 @@ module Sequel
         #
         # Like +eager+, you need to call +all+ on the dataset for the eager loading to work.  If you just
         # call +each+, it will yield plain hashes, each containing all columns from all the tables.
+        #
+        # To modify the associated dataset that will be joined to the current dataset, you should use a
+        # hash for the association, with the key being the association name symbol, and the value being
+        # a callable object that is called with the associated dataset and should return a modified
+        # dataset.  If that association also has dependent associations, instead of a callable object,
+        # use a hash with the callable object being the key, and the dependent association(s) as the value.
+        # 
+        # You can specify an alias by providing a Sequel::SQL::AliasedExpression object instead of
+        # an a Symbol for the assocation name.
+        #
+        # Examples:
+        #
+        #   # For each album, eager_graph load the artist
+        #   Album.eager_graph(:artist).all
+        #   # SELECT ...
+        #   # FROM albums
+        #   # LEFT OUTER JOIN artists AS artist ON (artists.id = albums.artist_id)
+        #
+        #   # For each album, eager_graph load the artist, using a specified alias
+        #   Album.eager_graph(Sequel[:artist].as(:a)).all
+        #   # SELECT ...
+        #   # FROM albums
+        #   # LEFT OUTER JOIN artists AS a ON (a.id = albums.artist_id)
+        #
+        #   # For each album, eager_graph load the artist and genre
+        #   Album.eager_graph(:artist, :genre).all
+        #   Album.eager_graph(:artist).eager_graph(:genre).all
+        #   # SELECT ...
+        #   # FROM albums
+        #   # LEFT OUTER JOIN artists AS artist ON (artist.id = albums.artist_id)
+        #   # LEFT OUTER JOIN genres AS genre ON (genre.id = albums.genre_id)
+        #
+        #   # For each artist, eager_graph load albums and tracks for each album
+        #   Artist.eager_graph(albums: :tracks).all
+        #   # SELECT ...
+        #   # FROM artists 
+        #   # LEFT OUTER JOIN albums ON (albums.artist_id = artists.id)
+        #   # LEFT OUTER JOIN tracks ON (tracks.album_id = albums.id)
+        #
+        #   # For each artist, eager_graph load albums, tracks for each album, and genre for each track
+        #   Artist.eager_graph(albums: {tracks: :genre}).all
+        #   # SELECT ...
+        #   # FROM artists 
+        #   # LEFT OUTER JOIN albums ON (albums.artist_id = artists.id)
+        #   # LEFT OUTER JOIN tracks ON (tracks.album_id = albums.id)
+        #   # LEFT OUTER JOIN genres AS genre ON (genre.id = tracks.genre_id)
+        #
+        #   # For each artist, eager_graph load albums with year > 1990
+        #   Artist.eager_graph(albums: proc{|ds| ds.where{year > 1990}}).all
+        #   # SELECT ...
+        #   # FROM artists 
+        #   # LEFT OUTER JOIN (
+        #   #   SELECT * FROM albums WHERE (year > 1990)
+        #   # ) AS albums ON (albums.artist_id = artists.id)
+        #
+        #   # For each artist, eager_graph load albums and tracks 1-10 for each album
+        #   Artist.eager_graph(albums: {tracks: proc{|ds| ds.where(number: 1..10)}}).all
+        #   # SELECT ...
+        #   # FROM artists 
+        #   # LEFT OUTER JOIN albums ON (albums.artist_id = artists.id)
+        #   # LEFT OUTER JOIN (
+        #   #   SELECT * FROM tracks WHERE ((number >= 1) AND (number <= 10))
+        #   # ) AS tracks ON (tracks.albums_id = albums.id)
+        #
+        #   # For each artist, eager_graph load albums with year > 1990, and tracks for those albums
+        #   Artist.eager_graph(albums: {proc{|ds| ds.where{year > 1990}}=>:tracks}).all
+        #   # SELECT ...
+        #   # FROM artists 
+        #   # LEFT OUTER JOIN (
+        #   #   SELECT * FROM albums WHERE (year > 1990)
+        #   # ) AS albums ON (albums.artist_id = artists.id)
+        #   # LEFT OUTER JOIN tracks ON (tracks.album_id = albums.id)
         def eager_graph(*associations)
           eager_graph_with_options(associations)
         end
@@ -2949,7 +3171,7 @@ module Sequel
         # Replace the array of plain hashes with an array of model objects will all eager_graphed
         # associations set in the associations cache for each object.
         def eager_graph_build_associations(hashes)
-          hashes.replace(EagerGraphLoader.new(self).load(hashes))
+          hashes.replace(_eager_graph_build_associations(hashes, eager_graph_loader))
         end
       
         private
@@ -2958,6 +3180,12 @@ module Sequel
         # conditions specified by the associations.
         def _association_join(type, associations)
           clone(:join=>clone(:graph_from_self=>false).eager_graph_with_options(associations, :join_type=>type, :join_only=>true).opts[:join])
+        end
+
+        # Process the array of hashes using the eager graph loader to return an array
+        # of model objects with the associations set.
+        def _eager_graph_build_associations(hashes, egl)
+          egl.load(hashes)
         end
 
         # If the association has conditions itself, then it requires additional filters be
@@ -3045,12 +3273,28 @@ module Sequel
         # per-call determining of the alias base.
         def eager_graph_check_association(model, association)
           if association.is_a?(SQL::AliasedExpression)
-            SQL::AliasedExpression.new(check_association(model, association.expression), association.alias)
+            expr = association.expression
+            if expr.is_a?(SQL::Identifier)
+              expr = expr.value
+              if expr.is_a?(String)
+                expr = expr.to_sym
+              end
+            end
+
+            SQL::AliasedExpression.new(check_association(model, expr), association.alias)
           else
             check_association(model, association)
           end
         end
       
+        # The EagerGraphLoader instance used for converting eager_graph results.
+        def eager_graph_loader
+          unless egl = cache_get(:_model_eager_graph_loader)
+            egl = cache_set(:_model_eager_graph_loader, EagerGraphLoader.new(self))
+          end
+          egl.dup
+        end
+
         # Eagerly load all specified associations 
         def eager_load(a, eager_assoc=@opts[:eager])
           return if a.empty?
@@ -3188,7 +3432,6 @@ module Sequel
         # Hash with table alias symbol keys and [limit, offset] values
         attr_reader :limit_map
         
-        # Hash with table alias symbol keys and callable values used to create model instances
         # The table alias symbol for the primary model
         attr_reader :master
         
@@ -3238,12 +3481,15 @@ module Sequel
               :offset
             end
           end
+          after_load_map.freeze
+          alias_map.freeze
+          type_map.freeze
 
           # Make dependency map hash out of requirements array for each association.
           # This builds a tree of dependencies that will be used for recursion
           # to ensure that all parts of the object graph are loaded into the
           # appropriate subordinate association.
-          @dependency_map = {}
+          dependency_map = @dependency_map = {}
           # Sort the associations by requirements length, so that
           # requirements are added to the dependency hash before their
           # dependencies.
@@ -3259,18 +3505,12 @@ module Sequel
               hash[ta] = {}
             end
           end
+          freezer = lambda do |h|
+            h.freeze
+            h.each_value(&freezer)
+          end
+          freezer.call(dependency_map)
       
-          # This mapping is used to make sure that duplicate entries in the
-          # result set are mapped to a single record.  For example, using a
-          # single one_to_many association with 10 associated records,
-          # the main object column values appear in the object graph 10 times.
-          # We map by primary key, if available, or by the object's entire values,
-          # if not. The mapping must be per table, so create sub maps for each table
-          # alias.
-          records_map = {@master=>{}}
-          alias_map.keys.each{|ta| records_map[ta] = {}}
-          @records_map = records_map
-
           datasets = opts[:graph][:table_aliases].to_a.reject{|ta,ds| ds.nil?}
           column_aliases = opts[:graph][:column_aliases]
           primary_keys = {}
@@ -3296,9 +3536,9 @@ module Sequel
               h.select{|ca, c| primary_keys[ta] = ca if pk == c}
             end
           end
-          @column_maps = column_maps
-          @primary_keys = primary_keys
-          @row_procs = row_procs
+          @column_maps = column_maps.freeze
+          @primary_keys = primary_keys.freeze
+          @row_procs = row_procs.freeze
 
           # For performance, create two special maps for the master table,
           # so you can skip a hash lookup.
@@ -3310,21 +3550,34 @@ module Sequel
           # used for performance, to get all values in one hash lookup instead of
           # separate hash lookups for each data structure.
           ta_map = {}
-          alias_map.keys.each do |ta|
-            ta_map[ta] = [records_map[ta], row_procs[ta], alias_map[ta], type_map[ta], reciprocal_map[ta]]
+          alias_map.each_key do |ta|
+            ta_map[ta] = [row_procs[ta], alias_map[ta], type_map[ta], reciprocal_map[ta]].freeze
           end
-          @ta_map = ta_map
+          @ta_map = ta_map.freeze
+          freeze
         end
 
         # Return an array of primary model instances with the associations cache prepopulated
         # for all model objects (both primary and associated).
         def load(hashes)
+          # This mapping is used to make sure that duplicate entries in the
+          # result set are mapped to a single record.  For example, using a
+          # single one_to_many association with 10 associated records,
+          # the main object column values appear in the object graph 10 times.
+          # We map by primary key, if available, or by the object's entire values,
+          # if not. The mapping must be per table, so create sub maps for each table
+          # alias.
+          @records_map = records_map = {}
+          alias_map.keys.each{|ta| records_map[ta] = {}}
+
           master = master()
       
           # Assign to local variables for speed increase
           rp = row_procs[master]
-          rm = records_map[master]
+          rm = records_map[master] = {}
           dm = dependency_map
+
+          records_map.freeze
 
           # This will hold the final record set that we will be replacing the object graph with.
           records = []
@@ -3346,6 +3599,9 @@ module Sequel
           # Run after_load procs if there are any
           post_process(records, dm) if @unique || !after_load_map.empty? || !limit_map.empty?
 
+          records_map.each_value(&:freeze)
+          freeze
+
           records
         end
       
@@ -3365,13 +3621,14 @@ module Sequel
               end
               key = hkey(ta_h)
             end
-            rm, rp, assoc_name, tm, rcm = @ta_map[ta]
+            rp, assoc_name, tm, rcm = @ta_map[ta]
+            rm = records_map[ta]
 
             # Check type map for all dependencies, and use a unique
             # object if any are dependencies for multiple objects,
             # to prevent duplicate objects from showing up in the case
             # the normal duplicate removal code is not being used.
-            if !@unique && !deps.empty? && deps.any?{|dep_key,_| @ta_map[dep_key][3]}
+            if !@unique && !deps.empty? && deps.any?{|dep_key,_| @ta_map[dep_key][2]}
               key = [current.object_id, key]
             end
 

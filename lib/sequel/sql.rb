@@ -18,7 +18,8 @@ module Sequel
   end
 
   # Time subclass that gets literalized with only the time value, so it operates
-  # like a standard SQL time type.
+  # like a standard SQL time type.  This type does not support timezones, by design,
+  # so it will not work correctly with <tt>time with time zone</tt> types.
   class SQLTime < ::Time
     @date = nil
 
@@ -26,10 +27,25 @@ module Sequel
       # Set the date used for SQLTime instances.
       attr_writer :date
 
-      # use the date explicitly set, or the current date if there is not a
+      # Use the date explicitly set, or the current date if there is not a
       # date set.
       def date
         @date || now
+      end
+
+      # Set the correct date and timezone when parsing times.
+      def parse(*)
+        t = super
+
+        utc = Sequel.application_timezone == :utc
+        d = @date
+        if d || utc
+          meth = utc ? :utc : :local
+          d ||= t
+          t = public_send(meth, d.year, d.month, d.day, t.hour, t.min, t.sec, t.usec)
+        end
+
+        t
       end
 
       # Create a new SQLTime instance given an hour, minute, second, and usec.
@@ -250,12 +266,12 @@ module Sequel
     # methods overlap with the standard +BooleanMethods methods+, and they only
     # make sense for integers, they are only included in +NumericExpression+.
     #
-    #   :a.sql_number & :b # "a" & "b"
-    #   :a.sql_number | :b # "a" | "b"
-    #   :a.sql_number ^ :b # "a" ^ "b"
-    #   :a.sql_number << :b # "a" << "b"
-    #   :a.sql_number >> :b # "a" >> "b"
-    #   ~:a.sql_number # ~"a"
+    #   Sequel[:a].sql_number & :b # "a" & "b"
+    #   Sequel[:a].sql_number | :b # "a" | "b"
+    #   Sequel[:a].sql_number ^ :b # "a" ^ "b"
+    #   Sequel[:a].sql_number << :b # "a" << "b"
+    #   Sequel[:a].sql_number >> :b # "a" >> "b"
+    #   ~Sequel[:a].sql_number # ~"a"
     module BitwiseMethods
       ComplexExpression::BITWISE_OPERATORS.each do |o|
         module_eval("def #{o}(o) NumericExpression.new(#{o.inspect}, self, o) end", __FILE__, __LINE__)
@@ -339,9 +355,15 @@ module Sequel
       end
 
       # Return an <tt>SQL::CaseExpression</tt> created with the given arguments.
+      # The first argument are the <tt>WHEN</tt>/<tt>THEN</tt> conditions,
+      # specified as an array or a hash.  The second argument is the
+      # <tt>ELSE</tt> default value.  The third optional argument is the
+      # <tt>CASE</tt> expression.
       #
-      #   Sequel.case([[{a: [2,3]}, 1]], 0) # SQL: CASE WHEN a IN (2, 3) THEN 1 ELSE 0 END
+      #   Sequel.case({a: 1}, 0) # SQL: CASE WHEN a THEN 1 ELSE 0 END
       #   Sequel.case({a: 1}, 0, :b) # SQL: CASE b WHEN a THEN 1 ELSE 0 END
+      #   Sequel.case({{a: [2,3]} => 1}, 0) # SQL: CASE WHEN a IN (2, 3) THEN 1 ELSE 0 END
+      #   Sequel.case([[{a: [2,3]}, 1]], 0) # SQL: CASE WHEN a IN (2, 3) THEN 1 ELSE 0 END
       def case(*args)
         SQL::CaseExpression.new(*args)
       end
@@ -730,10 +752,10 @@ module Sequel
     # This module includes the inequality methods (>, <, >=, <=) that are defined on objects that can be 
     # used in a numeric or string context in SQL.
     #
-    #   Sequel.lit('a') > :b # a > "b"
-    #   Sequel.lit('a') < :b # a > "b"
-    #   Sequel.lit('a') >= :b # a >= "b"
-    #   Sequel.lit('a') <= :b # a <= "b"
+    #   Sequel[:a] > :b # a > "b"
+    #   Sequel[:a] < :b # a > "b"
+    #   Sequel[:a] >= :b # a >= "b"
+    #   Sequel[:a] <= :b # a <= "b"
     module InequalityMethods
       ComplexExpression::INEQUALITY_OPERATORS.each do |o|
         module_eval("def #{o}(o) BooleanExpression.new(#{o.inspect}, self, o) end", __FILE__, __LINE__)
@@ -744,10 +766,10 @@ module Sequel
     # that are defined on objects that can be used in a numeric context in SQL
     # (+Symbol+, +LiteralString+, and +SQL::GenericExpression+).
     #
-    #   :a + :b # "a" + "b"
-    #   :a - :b # "a" - "b"
-    #   :a * :b # "a" * "b"
-    #   :a / :b # "a" / "b"
+    #   Sequel[:a] + :b # "a" + "b"
+    #   Sequel[:a] - :b # "a" - "b"
+    #   Sequel[:a] * :b # "a" * "b"
+    #   Sequel[:a] / :b # "a" / "b"
     #
     # One exception to this is if + is called with a +String+ or +StringExpression+,
     # in which case the || operator is used instead of the + operator:
@@ -1064,7 +1086,13 @@ module Sequel
             expr = new(:AND, expr, new(r.exclude_end? ? :< : :<=, l, r.end))
           end
           expr
-        when ::Array, ::Sequel::Dataset
+        when ::Array
+          r = r.dup.freeze unless r.frozen?
+          new(:IN, l, r)
+        when ::String
+          r = r.dup.freeze unless r.frozen?
+          new(:'=', l, r)
+        when ::Sequel::Dataset
           new(:IN, l, r)
         when NegativeBooleanConstant
           new(:"IS NOT", l, r.constant)
@@ -1096,8 +1124,21 @@ module Sequel
           case op = ce.op
           when :AND, :OR
             BooleanExpression.new(OPERTATOR_INVERSIONS[op], *ce.args.map{|a| BooleanExpression.invert(a)})
-          else
+          when :IN, :"NOT IN"
             BooleanExpression.new(OPERTATOR_INVERSIONS[op], *ce.args.dup)
+          else
+            if ce.args.length == 2
+              case ce.args[1]
+              when Function, LiteralString, PlaceholderLiteralString
+                # Special behavior to not push down inversion in this case because doing so
+                # can result in incorrect behavior for ANY/SOME/ALL operators.
+                BooleanExpression.new(:NOT, ce)
+              else
+                BooleanExpression.new(OPERTATOR_INVERSIONS[op], *ce.args.dup)
+              end
+            else
+              BooleanExpression.new(OPERTATOR_INVERSIONS[op], *ce.args.dup)
+            end
           end
         when StringExpression, NumericExpression
           raise(Sequel::Error, "cannot invert #{ce.inspect}")
@@ -1888,16 +1929,40 @@ module Sequel
     #   # (PARTITION BY col7 ROWS BETWEEN UNBOUNDED PRECEDING AND UNBOUNDED FOLLOWING)
     #   Sequel::SQL::Window.new(partition: :col7, frame: :rows)
     #   # (PARTITION BY col7 ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW)
-    #   Sequel::SQL::Window.new(partition: :col7, frame: "RANGE CURRENT ROW")
+    #   Sequel::SQL::Window.new(partition: :col7, frame: {type: :range, start: current})
     #   # (PARTITION BY col7 RANGE CURRENT ROW)
+    #   Sequel::SQL::Window.new(partition: :col7, frame: {type: :range, start: 1, end: 1})
+    #   # (PARTITION BY col7 RANGE BETWEEN 1 PRECEDING AND 1 FOLLOWING)
+    #   Sequel::SQL::Window.new(partition: :col7, frame: {type: :range, start: 2, end: [1, :preceding]})
+    #   # (PARTITION BY col7 RANGE BETWEEN 2 PRECEDING AND 1 PRECEDING)
+    #   Sequel::SQL::Window.new(partition: :col7, frame: {type: :range, start: 1, end: [2, :following]})
+    #   # (PARTITION BY col7 RANGE BETWEEN 1 FOLLOWING AND 2 FOLLOWING)
+    #   Sequel::SQL::Window.new(partition: :col7, frame: {type: :range, start: :preceding, exclude: :current})
+    #   # (PARTITION BY col7 RANGE UNBOUNDED PRECEDING EXCLUDE CURRENT ROW)
     #
     #   Sequel::SQL::Window.new(window: :named_window) # you can create a named window with Dataset#window
     #   # (named_window)
     class Window < Expression
       # The options for this window.  Options currently supported:
-      # :frame :: if specified, should be :all, :rows, or a String that is used literally. :all always operates over all rows in the
-      #           partition, while :rows excludes the current row's later peers.  The default is to include
-      #           all previous rows in the partition up to the current row's last peer.
+      # :frame :: if specified, should be :all, :rows, :range, :groups, a String, or a Hash.
+      #           :all :: Always operates over all rows in the partition
+      #           :rows :: Includes rows in the partition up to and including the current row
+      #           :range, :groups :: Includes rows in the partition up to and including the current group
+      #           String :: Used as literal SQL code, try to avoid
+      #           Hash :: Hash of options for the frame:
+      #                   :type :: The type of frame, must be :rows, :range, or :groups (required)
+      #                   :start :: The start of the frame (required).  Possible values:
+      #                             :preceding :: UNBOUNDED PRECEDING
+      #                             :following :: UNBOUNDED FOLLOWING
+      #                             :current :: CURRENT ROW
+      #                             String, Numeric, or Cast :: Used as the offset of rows/values preceding
+      #                             Array :: Must have two elements, with first element being String, Numeric, or
+      #                                      Cast and second element being :preceding or :following
+      #                   :end :: The end of the frame.  Can be left out.  If present, takes the same values as
+      #                           :start, except that when a String, Numeric, or Hash, it is used as the offset
+      #                           for rows following
+      #                   :exclude :: Which rows to exclude.  Possible values are :current, :ties, :group
+      #                               :no_others.
       # :order :: order on the column(s) given
       # :partition :: partition/group on the column(s) given
       # :window :: base results on a previously specified named window

@@ -232,7 +232,18 @@ module Sequel
       alias alter_table_rename_column_sql alter_table_change_column_sql
       alias alter_table_set_column_type_sql alter_table_change_column_sql
       alias alter_table_set_column_null_sql alter_table_change_column_sql
-      alias alter_table_set_column_default_sql alter_table_change_column_sql
+
+      def alter_table_set_column_default_sql(table, op)
+        return super unless op[:default].nil?
+
+        opts = schema(table).find{|x| x[0] == op[:name]}
+
+        if opts && opts[1][:allow_null] == false
+          "ALTER COLUMN #{quote_identifier(op[:name])} DROP DEFAULT"
+        else
+          super
+        end
+      end
 
       def alter_table_add_constraint_sql(table, op)
         if op[:type] == :foreign_key
@@ -430,7 +441,7 @@ module Sequel
         /cannot be null/ => NotNullConstraintViolation,
         /Deadlock found when trying to get lock; try restarting transaction/ => SerializationFailure,
         /CONSTRAINT .+ failed for/ => CheckConstraintViolation,
-        /\AStatement aborted because lock\(s\) could not be acquired immediately and NOWAIT is set\./ => DatabaseLockTimeout,
+        /\A(Statement aborted because lock\(s\) could not be acquired immediately and NOWAIT is set\.|Lock wait timeout exceeded; try restarting transaction)/ => DatabaseLockTimeout,
       }.freeze
       def database_error_regexps
         DATABASE_ERROR_REGEXPS
@@ -591,7 +602,7 @@ module Sequel
 
       Dataset.def_sql_method(self, :delete, %w'with delete from where order limit')
       Dataset.def_sql_method(self, :insert, %w'insert ignore into columns values on_duplicate_key_update')
-      Dataset.def_sql_method(self, :select, %w'with select distinct calc_found_rows columns from join where group having compounds order limit lock')
+      Dataset.def_sql_method(self, :select, %w'with select distinct calc_found_rows columns from join where group having window compounds order limit lock')
       Dataset.def_sql_method(self, :update, %w'with update ignore table set where order limit')
 
       include Sequel::Dataset::Replace
@@ -793,9 +804,9 @@ module Sequel
         true
       end
 
-      # MySQL does not support INTERSECT or EXCEPT
+      # MariaDB 10.3+ supports INTERSECT or EXCEPT
       def supports_intersect_except?
-        false
+        db.mariadb? && db.server_version >= 100300
       end
       
       # MySQL does not support limits in correlated subqueries (or any subqueries that use IN).
@@ -808,9 +819,9 @@ module Sequel
         true
       end
 
-      # MySQL 8+ supports NOWAIT.
+      # MySQL 8+ and MariaDB 10.3+ support NOWAIT.
       def supports_nowait?
-        !db.mariadb? && db.server_version >= 80000
+        db.server_version >= (db.mariadb? ? 100300 : 80000)
       end
 
       # MySQL's DISTINCT ON emulation using GROUP BY does not respect the
@@ -833,6 +844,11 @@ module Sequel
       # are suppported.
       def supports_timestamp_usecs?
         db.supports_timestamp_usecs?
+      end
+
+      # MySQL 8+ supports WINDOW clause.
+      def supports_window_clause?
+        !db.mariadb? && db.server_version >= 80000
       end
 
       # MariaDB 10.2+ and MySQL 8+ support window functions
@@ -990,6 +1006,11 @@ module Sequel
 
       def non_sql_option?(key)
         super || key == :insert_ignore || key == :update_ignore || key == :on_duplicate_key_update
+      end
+
+      # MySQL does not natively support NULLS FIRST/LAST.
+      def requires_emulating_nulls_first?
+        true
       end
 
       def select_only_offset_sql(sql)

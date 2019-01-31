@@ -559,13 +559,30 @@ module Sequel
 
     # Append literalization of ordered expression to SQL string.
     def ordered_expression_sql_append(sql, oe)
+      if emulate = requires_emulating_nulls_first?
+        case oe.nulls
+        when :first
+          null_order = 0
+        when :last
+          null_order = 2
+        end
+
+        if null_order
+          literal_append(sql, Sequel.case({{oe.expression=>nil}=>null_order}, 1))
+          sql << ", "
+        end
+      end
+
       literal_append(sql, oe.expression)
       sql << (oe.descending ? ' DESC' : ' ASC')
-      case oe.nulls
-      when :first
-        sql << " NULLS FIRST"
-      when :last
-        sql << " NULLS LAST"
+
+      unless emulate
+        case oe.nulls
+        when :first
+          sql << " NULLS FIRST"
+        when :last
+          sql << " NULLS LAST"
+        end
       end
     end
 
@@ -700,8 +717,19 @@ module Sequel
 
     # Append literalization of subscripts (SQL array accesses) to SQL string.
     def subscript_sql_append(sql, s)
+      case s.expression
+      when Symbol, SQL::Subscript, SQL::Identifier, SQL::QualifiedIdentifier
+        # nothing
+      else
+        wrap_expression = true
+        sql << '('
+      end
       literal_append(sql, s.expression)
-      sql << '['
+      if wrap_expression
+        sql << ')['
+      else
+        sql << '['
+      end
       sub = s.sub
       if sub.length == 1 && (range = sub.first).is_a?(Range)
         literal_append(sql, range.begin)
@@ -718,41 +746,86 @@ module Sequel
     # Append literalization of windows (for window functions) to SQL string.
     def window_sql_append(sql, opts)
       raise(Error, 'This dataset does not support window functions') unless supports_window_functions?
-      sql << '('
-      window, part, order, frame = opts.values_at(:window, :partition, :order, :frame)
       space = false
       space_s = ' '
-      if window
+
+      sql << '('
+
+      if window = opts[:window]
         literal_append(sql, window)
         space = true
       end
-      if part
+
+      if part = opts[:partition]
         sql << space_s if space
         sql << "PARTITION BY "
         expression_list_append(sql, Array(part))
         space = true
       end
-      if order
+
+      if order = opts[:order]
         sql << space_s if space
         sql << "ORDER BY "
         expression_list_append(sql, Array(order))
         space = true
       end
-      case frame
-        when nil
-          # nothing
-        when :all
-          sql << space_s if space
-          sql << "ROWS BETWEEN UNBOUNDED PRECEDING AND UNBOUNDED FOLLOWING"
-        when :rows
-          sql << space_s if space
-          sql << "ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW"
-        when String
-          sql << space_s if space
+
+      if frame = opts[:frame]
+        sql << space_s if space
+
+        if frame.is_a?(String)
           sql << frame
         else
-          raise Error, "invalid window frame clause, should be :all, :rows, a string, or nil"
+          case frame
+          when :all
+            frame_type = :rows
+            frame_start = :preceding
+            frame_end = :following
+          when :rows, :range, :groups
+            frame_type = frame
+            frame_start = :preceding
+            frame_end = :current
+          when Hash
+            frame_type = frame[:type]
+            unless frame_type == :rows || frame_type == :range || frame_type == :groups
+              raise Error, "invalid window :frame :type option: #{frame_type.inspect}"
+            end
+            unless frame_start = frame[:start]
+              raise Error, "invalid window :frame :start option: #{frame_start.inspect}"
+            end
+            frame_end = frame[:end]
+            frame_exclude = frame[:exclude]
+          else
+            raise Error, "invalid window :frame option: #{frame.inspect}"
+          end
+
+          sql << frame_type.to_s.upcase << " "
+          sql << 'BETWEEN ' if frame_end
+          window_frame_boundary_sql_append(sql, frame_start, :preceding)
+          if frame_end
+            sql << " AND "
+            window_frame_boundary_sql_append(sql, frame_end, :following)
+          end
+
+          if frame_exclude
+            sql << " EXCLUDE "
+
+            case frame_exclude
+            when :current
+              sql << "CURRENT ROW"
+            when :group
+              sql << "GROUP"
+            when :ties
+              sql << "TIES"
+            when :no_others
+              sql << "NO OTHERS"
+            else
+              raise Error, "invalid window :frame :exclude option: #{frame_exclude.inspect}"
+            end
+          end
+        end
       end
+
       sql << ')'
     end
 
@@ -1412,6 +1485,22 @@ module Sequel
     alias delete_where_sql select_where_sql
     alias update_where_sql select_where_sql
     
+    def select_window_sql(sql)
+      if ws = @opts[:window]
+        sql << " WINDOW "
+        c = false
+        co = ', '
+        as = ' AS '
+        ws.map do |name, window|
+          sql << co if c
+          literal_append(sql, name)
+          sql << as
+          literal_append(sql, window)
+          c ||= true
+        end
+      end
+    end
+
     def select_with_sql(sql)
       return unless supports_cte?
       ws = opts[:with]
@@ -1492,7 +1581,17 @@ module Sequel
 
     # Append literalization of the subselect to SQL string.
     def subselect_sql_append(sql, ds)
-      ds.clone(:append_sql=>sql).sql
+      sds = subselect_sql_dataset(sql, ds)
+      sds.sql
+      unless sds.send(:cache_sql?)
+        # If subquery dataset does not allow caching SQL,
+        # then this dataset should not allow caching SQL.
+        disable_sql_caching!
+      end
+    end
+
+    def subselect_sql_dataset(sql, ds)
+      ds.clone(:append_sql=>sql)
     end
 
     # The number of decimal digits of precision to use in timestamps.
@@ -1534,6 +1633,36 @@ module Sequel
 
     def update_update_sql(sql)
       sql << 'UPDATE'
+    end
+
+    def window_frame_boundary_sql_append(sql, boundary, direction)
+      case boundary
+      when :current
+       sql << "CURRENT ROW"
+      when :preceding
+        sql << "UNBOUNDED PRECEDING"
+      when :following
+        sql << "UNBOUNDED FOLLOWING"
+      else
+        if boundary.is_a?(Array)
+          offset, direction = boundary
+          unless boundary.length == 2 && (direction == :preceding || direction == :following)
+            raise Error, "invalid window :frame boundary (:start or :end) option: #{boundary.inspect}"
+          end
+        else
+          offset = boundary
+        end
+
+        case offset
+        when Numeric, String, SQL::Cast
+          # nothing
+        else
+          raise Error, "invalid window :frame boundary (:start or :end) option: #{boundary.inspect}"
+        end
+
+        literal_append(sql, offset)
+        sql << (direction == :preceding ? " PRECEDING" : " FOLLOWING")
+      end
     end
   end
 end

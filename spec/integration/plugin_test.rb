@@ -1709,7 +1709,9 @@ describe "Sequel::Plugins::Tree" do
 
     it "iterate top-level nodes in order" do
       @Node.roots_dataset.count.must_equal 5
-      @Node.roots.map{|p| p.name}.must_equal %w'one two three four five'
+      @Node.roots.map(&:name).must_equal %w'one two three four five'
+      @Node.where(:name=>%w'one two.one').roots_dataset.count.must_equal 1
+      @Node.where(:name=>%w'one two.one').roots.map(&:name).must_equal %w'one'
     end
   
     it "should have children" do
@@ -1989,6 +1991,13 @@ describe "Caching plugins" do
     end
 
     include CachingPluginSpecs
+
+    it "should have first retrieve correct values" do 
+      @Artist.first.must_equal @Artist.load(:id=>1)
+      @Artist.first(1).must_equal [@Artist.load(:id=>1)]
+      @Artist.first(:id=>1).must_equal @Artist.load(:id=>1)
+      @Artist.first{id =~ 1}.must_equal @Artist.load(:id=>1)
+    end
   end
 end
 
@@ -2019,8 +2028,9 @@ describe "Sequel::Plugins::ConstraintValidations" do
       max_length 6, :minlen, opts.merge(:name=>:maxl2)
       operator :<, 'm', :exactlen, opts.merge(:name=>:lt)
       operator :>=, 5, :num, opts.merge(:name=>:gte)
+      presence [:m1, :m2, :m3], opts.merge(:name=>:pm)
     end
-    @valid_row = {:pre=>'a', :exactlen=>'12345', :minlen=>'12345', :maxlen=>'12345', :lenrange=>'1234', :lik=>'fooabc', :ilik=>'FooABC', :inc=>'abc', :uniq=>'u', :num=>5}
+    @valid_row = {:pre=>'a', :exactlen=>'12345', :minlen=>'12345', :maxlen=>'12345', :lenrange=>'1234', :lik=>'fooabc', :ilik=>'FooABC', :inc=>'abc', :uniq=>'u', :num=>5, :m1=>'a', :m2=>1, :m3=>'a'}
     @violations = [
       [:pre, [nil, '', ' ']],
       [:exactlen, [nil, '', '1234', '123456', 'n1234']],
@@ -2061,6 +2071,41 @@ describe "Sequel::Plugins::ConstraintValidations" do
         end
       end
 
+      try = @valid_row.dup
+      if @validation_opts[:allow_nil]
+        [:m1, :m2, :m3].each do |c|
+          @ds.insert(try.merge(c=>nil))
+          @ds.delete
+        end
+        @ds.insert(try.merge(:m1=>nil, :m2=>nil))
+        @ds.delete
+        @ds.insert(try.merge(:m1=>nil, :m3=>nil))
+        @ds.delete
+        @ds.insert(try.merge(:m2=>nil, :m3=>nil))
+        @ds.delete
+        @ds.insert(try.merge(:m1=>nil, :m2=>nil, :m3=>nil))
+        @ds.delete
+      else
+        [:m1, :m2, :m3].each do |c|
+          proc{@ds.insert(try.merge(c=>nil))}.must_raise(Sequel::DatabaseError)
+        end
+        proc{@ds.insert(try.merge(:m1=>nil, :m2=>nil))}.must_raise(Sequel::DatabaseError)
+        proc{@ds.insert(try.merge(:m1=>nil, :m3=>nil))}.must_raise(Sequel::DatabaseError)
+        proc{@ds.insert(try.merge(:m2=>nil, :m3=>nil))}.must_raise(Sequel::DatabaseError)
+        proc{@ds.insert(try.merge(:m1=>nil, :m2=>nil, :m3=>nil))}.must_raise(Sequel::DatabaseError)
+      end
+
+      unless @db.database_type == :oracle
+        [:m1,  :m3].each do |c|
+          proc{@ds.insert(try.merge(c=>''))}.must_raise(Sequel::DatabaseError)
+        end
+        proc{@ds.insert(try.merge(:m1=>'', :m3=>''))}.must_raise(Sequel::DatabaseError)
+        proc{@ds.insert(try.merge(:m1=>'', :m2=>nil))}.must_raise(Sequel::DatabaseError)
+        proc{@ds.insert(try.merge(:m1=>nil, :m3=>''))}.must_raise(Sequel::DatabaseError)
+        proc{@ds.insert(try.merge(:m2=>nil, :m3=>''))}.must_raise(Sequel::DatabaseError)
+        proc{@ds.insert(try.merge(:m1=>'', :m2=>nil, :m3=>''))}.must_raise(Sequel::DatabaseError)
+      end
+
       # Test for dropping of constraint
       @db.alter_table(:cv_test){validate{drop :maxl2}}
       @ds.insert(@valid_row.merge(:minlen=>'1234567'))
@@ -2085,6 +2130,34 @@ describe "Sequel::Plugins::ConstraintValidations" do
           c.new(try).wont_be :valid?
         end
       end
+
+      try = @valid_row.dup
+      if @validation_opts[:allow_nil]
+        [:m1, :m2, :m3].each do |col|
+          c.new(try.merge(col=>nil)).must_be :valid?
+        end
+        c.new(try.merge(:m1=>nil, :m2=>nil)).must_be :valid?
+        c.new(try.merge(:m1=>nil, :m3=>nil)).must_be :valid?
+        c.new(try.merge(:m2=>nil, :m3=>nil)).must_be :valid?
+        c.new(try.merge(:m1=>nil, :m2=>nil, :m3=>nil)).must_be :valid?
+      else
+        [:m1, :m2, :m3].each do |col|
+          c.new(try.merge(col=>nil)).wont_be :valid?
+        end
+        c.new(try.merge(:m1=>nil, :m2=>nil)).wont_be :valid?
+        c.new(try.merge(:m1=>nil, :m3=>nil)).wont_be :valid?
+        c.new(try.merge(:m2=>nil, :m3=>nil)).wont_be :valid?
+        c.new(try.merge(:m1=>nil, :m2=>nil, :m3=>nil)).wont_be :valid?
+      end
+      c.new(try.merge(:m1=>'', :m2=>nil)).wont_be :valid?
+      c.new(try.merge(:m1=>nil, :m3=>'')).wont_be :valid?
+      c.new(try.merge(:m2=>nil, :m3=>'')).wont_be :valid?
+      c.new(try.merge(:m1=>'', :m2=>nil, :m3=>'')).wont_be :valid?
+      [:m1,  :m3].each do |col|
+        c.new(try.merge(col=>'')).wont_be :valid?
+      end
+      c.new(try.merge(:m1=>'', :m3=>'')).wont_be :valid?
+
       c.db.constraint_validations = nil
     end
   end
@@ -2109,6 +2182,9 @@ describe "Sequel::Plugins::ConstraintValidations" do
           String :inc
           String :uniq, :null=>false
           Integer :num
+          String :m1
+          Integer :m2
+          String :m3
           validate(&validate_block)
         end
       end
@@ -2155,6 +2231,9 @@ describe "Sequel::Plugins::ConstraintValidations" do
             add_column :form, String
           end
           add_column :num, Integer
+          add_column :m1, String
+          add_column :m2, Integer
+          add_column :m3, String
           validate(&validate_block)
         end
       end

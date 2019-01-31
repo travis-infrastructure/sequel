@@ -70,28 +70,13 @@ module Sequel
         attr_reader :children_association_name
 
         Plugins.inherited_instance_variables(self, :@parent_column=>nil, :@tree_order=>nil, :@parent_association_name=>nil, :@children_association_name=>nil)
+        Plugins.def_dataset_methods(self, [:roots, :roots_dataset])
 
         # Should freeze tree order if it is an array when freezing the model class.
         def freeze
           @tree_order.freeze if @tree_order.is_a?(Array)
         
           super
-        end
-
-        # Returns list of all root nodes (those with no parent nodes).
-        #
-        #   TreeClass.roots # => [root1, root2]
-        def roots
-          roots_dataset.all
-        end
-        
-        # Returns the dataset for retrieval of all root nodes
-        #
-        #   TreeClass.roots_dataset # => Sequel::Dataset instance
-        def roots_dataset
-          ds = where(Sequel.or(Array(parent_column).zip([])))
-          ds = ds.order(*tree_order) if tree_order
-          ds
         end
       end
       
@@ -151,6 +136,24 @@ module Sequel
         # True if if all parent columns values are not NULL.
         def possible_root?
           !Array(model.parent_column).map{|c| self[c]}.all?
+        end
+      end
+
+      module DatasetMethods
+        # Returns list of all root nodes (those with no parent nodes).
+        #
+        #   TreeClass.roots # => [root1, root2]
+        def roots
+          roots_dataset.all
+        end
+
+        # Returns the dataset for retrieval of all root nodes
+        #
+        #   TreeClass.roots_dataset # => Sequel::Dataset instance
+        def roots_dataset
+          ds = where(Sequel.or(Array(model.parent_column).zip([])))
+          ds = ds.order(*model.tree_order) if model.tree_order
+          ds
         end
       end
 

@@ -566,3 +566,163 @@ describe "class_table_inheritance plugin with duplicate columns" do
   end
 end
 
+describe "class_table_inheritance plugin with dataset defined with QualifiedIdentifier" do
+  before do
+    @db = Sequel.mock(:numrows=>1, :autoid=>proc{|sql| 1})
+    def @db.supports_schema_parsing?() true end
+    def @db.schema(table, opts={})
+      {Sequel[:hr][:employees]=>[[:id, {:primary_key=>true, :type=>:integer}], [:name, {:type=>:string}], [:kind, {:type=>:string}]],
+       Sequel[:hr][:managers]=>[[:id, {:type=>:integer}]],
+       Sequel[:hr][:staff]=>[[:id, {:type=>:integer}], [:manager_id, {:type=>:integer}]],
+       Sequel[:hr][:executives]=>[[:id, {:type=>:integer}], [:num_managers, {:type=>:integer}]],
+      }[table.is_a?(Sequel::Dataset) ? table.first_source_table : table]
+    end
+    @db.extend_datasets do
+      def columns
+        {[Sequel[:hr][:employees]]=>[:id, :name, :kind],
+         [Sequel[:hr][:managers]]=>[:id],
+         [Sequel[:hr][:staff]]=>[:id, :manager_id],
+         [Sequel[:hr][:employees], Sequel[:hr][:managers]]=>[:id, :name, :kind],
+         [Sequel[:hr][:employees], Sequel[:hr][:staff]]=>[:id, :name, :kind, :manager_id],
+         [Sequel[:hr][:employees], Sequel[:hr][:managers], Sequel[:hr][:executives]]=>[:id, :name, :kind, :manager_id, :num_managers],
+        }[opts[:from] + (opts[:join] || []).map{|x| x.table}]
+      end
+    end
+  end
+  after do
+    [:Manager, :Staff, :Employee, :Executive].each{|s| Object.send(:remove_const, s) if Object.const_defined?(s)}
+  end
+
+  describe "with table_map used to qualify subclasses" do
+    before do
+      ::Employee = Class.new(Sequel::Model)
+      ::Employee.db = @db
+      ::Employee.set_dataset(Sequel[:hr][:employees])
+      class ::Employee
+        def _save_refresh; @values[:id] = 1 end
+        def self.columns
+          dataset.columns || dataset.opts[:from].first.expression.columns
+        end
+        plugin :class_table_inheritance, :table_map=>{:Manager=>Sequel[:hr][:managers],:Staff=>Sequel[:hr][:staff]}
+      end
+      class ::Manager < Employee
+        one_to_many :staff_members, :class=>:Staff
+      end
+      class ::Staff < Employee
+        many_to_one :manager
+      end
+    end
+
+    it "should handle many_to_one relationships correctly" do
+      Manager.dataset = Manager.dataset.with_fetch(:id=>3, :name=>'E')
+      Staff.load(:manager_id=>3).manager.must_equal Manager.load(:id=>3, :name=>'E')
+      @db.sqls.must_equal ['SELECT * FROM (SELECT hr.employees.id, hr.employees.name, hr.employees.kind FROM hr.employees INNER JOIN hr.managers ON (hr.managers.id = hr.employees.id)) AS employees WHERE (id = 3) LIMIT 1']
+    end
+
+    it "should handle one_to_many relationships correctly" do
+      Staff.dataset = Staff.dataset.with_fetch(:id=>1, :name=>'S', :manager_id=>3)
+      Manager.load(:id=>3).staff_members.must_equal [Staff.load(:id=>1, :name=>'S', :manager_id=>3)]
+      @db.sqls.must_equal ['SELECT * FROM (SELECT hr.employees.id, hr.employees.name, hr.employees.kind, hr.staff.manager_id FROM hr.employees INNER JOIN hr.staff ON (hr.staff.id = hr.employees.id)) AS employees WHERE (employees.manager_id = 3)']
+    end
+  end
+
+  describe "without table_map or qualify_tables set" do
+    it "should use a non-qualified subquery in subclasses" do
+      def @db.schema(table, opts={})
+        {Sequel[:hr][:employees]=>[[:id, {:primary_key=>true, :type=>:integer}], [:name, {:type=>:string}], [:kind, {:type=>:string}]],
+         :managers=>[[:id, {:type=>:integer}]],
+        }[table.is_a?(Sequel::Dataset) ? table.first_source_table : table]
+      end
+      @db.extend_datasets do
+        def columns
+          {[Sequel[:hr][:employees]]=>[:id, :name, :kind],
+           [:managers]=>[:id],
+           [Sequel[:hr][:employees], :managers]=>[:id, :name, :kind]
+          }[opts[:from] + (opts[:join] || []).map{|x| x.table}]
+        end
+      end
+      ::Employee = Class.new(Sequel::Model)
+      ::Employee.db = @db
+      ::Employee.set_dataset(Sequel[:hr][:employees])
+      class ::Employee
+        def _save_refresh; @values[:id] = 1 end
+        def self.columns
+          dataset.columns || dataset.opts[:from].first.expression.columns
+        end
+        plugin :class_table_inheritance
+      end
+      class ::Manager < ::Employee
+      end
+
+      Employee.dataset.sql.must_equal 'SELECT * FROM hr.employees'
+      Manager.dataset.sql.must_equal 'SELECT * FROM (SELECT hr.employees.id, hr.employees.name, hr.employees.kind FROM hr.employees INNER JOIN managers ON (managers.id = hr.employees.id)) AS employees'
+    end
+  end
+
+  describe "with qualify_tables option set" do
+    it "should use a subquery with the same qualifier in subclasses" do
+      ::Employee = Class.new(Sequel::Model)
+      ::Employee.db = @db
+      ::Employee.set_dataset(Sequel[:hr][:employees])
+      class ::Employee
+        def _save_refresh; @values[:id] = 1 end
+        def self.columns
+          dataset.columns || dataset.opts[:from].first.expression.columns
+        end
+        plugin :class_table_inheritance, :table_map=>{:Staff=>Sequel[:hr][:staff]}, qualify_tables: true
+      end
+      class ::Manager < ::Employee
+        one_to_many :staff_members, :class=>:Staff
+      end
+      class ::Staff < ::Employee
+        many_to_one :manager
+      end
+      class ::Executive < ::Manager
+      end
+
+      Employee.dataset.sql.must_equal 'SELECT * FROM hr.employees'
+      Manager.dataset.sql.must_equal 'SELECT * FROM (SELECT hr.employees.id, hr.employees.name, hr.employees.kind FROM hr.employees INNER JOIN hr.managers ON (hr.managers.id = hr.employees.id)) AS employees'
+      Staff.dataset.sql.must_equal 'SELECT * FROM (SELECT hr.employees.id, hr.employees.name, hr.employees.kind, hr.staff.manager_id FROM hr.employees INNER JOIN hr.staff ON (hr.staff.id = hr.employees.id)) AS employees'
+      Executive.dataset.sql.must_equal 'SELECT * FROM (SELECT hr.employees.id, hr.employees.name, hr.employees.kind, hr.executives.num_managers FROM hr.employees INNER JOIN hr.managers ON (hr.managers.id = hr.employees.id) INNER JOIN hr.executives ON (hr.executives.id = hr.managers.id)) AS employees'
+    end
+  end
+end
+
+describe "class_table_inheritance plugin with schema_caching extension" do
+  before do
+    @db = Sequel.mock(:autoid=>proc{|sql| 1})
+    def @db.supports_schema_parsing?() true end
+    def @db.schema(table, opts={})
+      {:employees=>[[:id, {:primary_key=>true, :type=>:integer}], [:name, {:type=>:string}], [:kind, {:type=>:string}]],
+       :managers=>[[:id, {:type=>:integer}], [:num_staff, {:type=>:integer}] ],
+       :executives=>[[:id, {:type=>:integer}], [:num_managers, {:type=>:integer}]],
+       }[table.is_a?(Sequel::Dataset) ? table.first_source_table : table]
+    end
+  end
+  after do
+    [:Executive, :Manager, :Employee, :Staff].each{|s| Object.send(:remove_const, s) if Object.const_defined?(s)}
+  end
+
+  it "should not query for columns if the schema cache is present and a table_map is given" do
+    class ::Employee < Sequel::Model(@db)
+      plugin :class_table_inheritance, :table_map=>{:Staff=>:employees, :Manager=>:managers, :Executive=>:executives}
+    end
+    class ::Staff < Employee; end
+    class ::Manager < Employee; end
+    class ::Executive < Manager; end
+    Employee.columns.must_equal [:id, :name, :kind]
+    Staff.columns.must_equal [:id, :name, :kind]
+    Manager.columns.must_equal [:id, :name, :kind, :num_staff]
+    Executive.columns.must_equal [:id, :name, :kind, :num_staff, :num_managers]
+    @db.sqls.must_equal []
+  end
+
+  it "should not query for columns if the schema cache is present and no table_map is given" do
+    class ::Employee < Sequel::Model(@db)
+      plugin :class_table_inheritance
+    end
+    class ::Manager < Employee; end
+    class ::Executive < Manager; end
+    @db.sqls.must_equal []
+  end
+end

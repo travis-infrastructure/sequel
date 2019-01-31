@@ -389,7 +389,8 @@ module Sequel
     #             using the :table and :column options.
     # :relative :: Run the given number of migrations, with a positive number being migrations to migrate
     #              up, and a negative number being migrations to migrate down (IntegerMigrator only).
-    # :table :: The table containing the schema version (default: :schema_info).
+    # :table :: The table containing the schema version (default: :schema_info for integer migrations and
+    #           :schema_migrations for timestamped migrations).
     # :target :: The target version to which to migrate.  If not given, migrates to the maximum version.
     #
     # Examples: 
@@ -405,6 +406,7 @@ module Sequel
     # if the version number is greater than 20000101, otherwise uses the IntegerMigrator.
     def self.migrator_class(directory)
       if self.equal?(Migrator)
+        raise(Error, "Must supply a valid migration path") unless File.directory?(directory)
         Dir.new(directory).each do |file|
           next unless MIGRATION_FILE_PATTERN.match(file)
           return TimestampMigrator if file.split('_', 2).first.to_i > 20000101
@@ -519,7 +521,6 @@ module Sequel
       raise(Error, "No current version available") unless current
 
       latest_version = latest_migration_version
-
       @target = if opts[:target]
         opts[:target]
       elsif opts[:relative]
@@ -528,7 +529,7 @@ module Sequel
         latest_version
       end
 
-      raise(Error, "No target version available, probably because no migration files found or filenames don't follow the migration filename convention") unless target
+      raise(Error, "No target and/or latest version available, probably because no migration files found or filenames don't follow the migration filename convention") unless target && latest_version
 
       if @target > latest_version
         @target = latest_version

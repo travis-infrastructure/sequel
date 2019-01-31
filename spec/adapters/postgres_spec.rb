@@ -462,6 +462,12 @@ describe "A PostgreSQL database " do
     DB.drop_table?(:b, :a)
   end
 
+  it "should handle non-ASCII column aliases" do
+    s = String.new("\u00E4").force_encoding(DB.get('a').encoding)
+    k, v = DB.select(Sequel.as(s, s)).first.shift
+    k.to_s.must_equal v
+  end
+
   it "should parse foreign keys referencing current table using :reverse option" do
     DB.create_table!(:a) do
       primary_key :id
@@ -869,6 +875,9 @@ describe "A PostgreSQL dataset with a timestamp field" do
   end
   after do
     @db.convert_infinite_timestamps = false
+    Sequel.datetime_class = Time
+    Sequel::SQLTime.date = nil
+    Sequel.application_timezone = nil
   end
   after(:all) do
     @db.drop_table?(:test3)
@@ -892,22 +901,62 @@ describe "A PostgreSQL dataset with a timestamp field" do
     (t2.is_a?(Time) ? t2.usec : t2.strftime('%N').to_i/1000).must_equal t.strftime('%N').to_i/1000
   end
 
+  it "should respect SQLTime.date setting for time columns" do
+    Sequel::SQLTime.date = Time.local(2000, 1, 2)
+    d = Sequel::SQLTime.create(10, 11, 12)
+    @db.get(Sequel.cast(d, :time)).must_equal d
+    @db.get(Sequel.cast(d, :timetz)).must_equal d
+  end
+
+  it "should respect Sequel.application_timezone for time columns" do
+    d = Sequel::SQLTime.create(10, 11, 12)
+    Sequel.application_timezone = :local
+    @db.get(Sequel.cast(d, :time)).utc_offset.must_equal Time.now.utc_offset
+    @db.get(Sequel.cast(d, :timetz)).utc_offset.must_equal Time.now.utc_offset
+    Sequel.application_timezone = :utc
+    @db.get(Sequel.cast(d, :time)).utc_offset.must_equal 0
+    @db.get(Sequel.cast(d, :timetz)).utc_offset.must_equal 0
+  end
+
+  it "should handle parsing dates and timestamps in with 1, 2, and 3 digit years" do
+    [1, 10, 100, -2, -20, -200].each do |year|
+      d = Date.new(year, 2, 3)
+      @db.get(Sequel.cast(d, Date)).must_equal d
+      d = Time.local(year, 2, 3, 10, 11, 12)
+      @db.get(Sequel.cast(d, Time)).must_equal d
+      begin
+        Sequel.datetime_class = DateTime
+        d = DateTime.new(year, 2, 3, 10, 11, 12)
+        @db.get(Sequel.cast(d, Time)).must_equal d
+      ensure
+        Sequel.datetime_class = Time
+      end
+    end
+  end
+
+  it "should handle parsing dates and timestamps in the distant future" do
+    d = Date.new(5874896, 2, 3)
+    @db.get(Sequel.cast(d, Date)).must_equal d
+    d = Time.local(294275, 2, 3, 10, 11, 12)
+    @db.get(Sequel.cast(d, Time)).must_equal d
+    Sequel.datetime_class = DateTime
+    d = DateTime.new(294275, 2, 3, 10, 11, 12)
+    @db.get(Sequel.cast(d, Time)).must_equal d
+  end
+
   it "should handle BC times and dates" do
     d = Date.new(-1234, 2, 3)
     @db.get(Sequel.cast(d, Date)).must_equal d
-    begin
-      Sequel.default_timezone = :utc
-      t = Time.at(-100000000000).utc + 0.5
-      @db.get(Sequel.cast(t, Time)).must_equal t
-      @db.get(Sequel.cast(t, :timestamptz)).must_equal t
-      Sequel.datetime_class = DateTime
-      dt = DateTime.new(-1234, 2, 3, 10, 20, Rational(30, 20))
-      @db.get(Sequel.cast(dt, DateTime)).must_equal dt
-      @db.get(Sequel.cast(dt, :timestamptz)).must_equal dt
-    ensure
-      Sequel.datetime_class = Time
-      Sequel.default_timezone = nil
-    end
+    Sequel.default_timezone = :utc
+    t = Time.at(-100000000000).utc + 0.5
+    @db.get(Sequel.cast(t, Time)).must_equal t
+    @db.get(Sequel.cast(t, :timestamptz)).must_equal t
+    Sequel.datetime_class = DateTime
+    dt = DateTime.new(-1234, 2, 3, 10, 20, Rational(30, 20))
+    @db.get(Sequel.cast(dt, DateTime)).must_equal dt
+    @db.get(Sequel.cast(dt, :timestamptz)).must_equal dt
+    Sequel.datetime_class = Time
+    Sequel.default_timezone = nil
   end
 
   it "should handle infinite timestamps if convert_infinite_timestamps is set" do
@@ -1189,6 +1238,45 @@ describe "A PostgreSQL database" do
     proc{@db.alter_table(:posts){add_column :b, Integer}}.must_raise Sequel::DatabaseError
   end if DB.server_version >= 90600
 end
+
+describe "Sequel::Postgres::Database" do
+  before do
+    @db = DB
+    @db.create_table!(:posts){Integer :a}
+  end
+  after do
+    @db.run("DROP PROCEDURE test_procedure_posts(int, int)")
+    @db.drop_table?(:posts)
+  end
+
+  it "#call_procedure should call a procedure that returns a row" do
+    @db.run <<SQL
+CREATE OR REPLACE PROCEDURE test_procedure_posts(inout a int, inout b int)
+LANGUAGE SQL
+AS $$
+INSERT INTO posts VALUES (a) RETURNING *;
+INSERT INTO posts VALUES (a * 2) RETURNING *;
+SELECT max(posts.a), min(posts.a) FROM posts;
+$$;
+SQL
+    @db.call_procedure(:test_procedure_posts, 1, nil).must_equal(:a=>2, :b=>1)
+    @db.call_procedure(:test_procedure_posts, 3, nil).must_equal(:a=>6, :b=>1)
+  end
+
+
+  it "#call_procedure should call a procedure that doesn't return a row" do
+    @db.run <<SQL
+CREATE OR REPLACE PROCEDURE test_procedure_posts(int, int)
+LANGUAGE SQL
+AS $$
+INSERT INTO posts VALUES ($1) RETURNING *;
+INSERT INTO posts VALUES ($1 * 2) RETURNING *;
+$$;
+SQL
+    @db.call_procedure(:test_procedure_posts, 1, nil).must_be_nil
+    @db.call_procedure(:test_procedure_posts, 3, nil).must_be_nil
+  end
+end if DB.adapter_scheme == :postgres && DB.server_version >= 110000
 
 describe "Postgres::Dataset#import" do
   before do
@@ -1618,36 +1706,6 @@ if DB.server_version >= 80300
       record = {:title => "multiple words", :body =>nil}
       @ds.insert(record)
       @ds.full_text_search([:title, :body], "words").all.must_equal [record]
-    end
-  end
-end
-
-if DB.dataset.supports_window_functions?
-  describe "Postgres::Dataset named windows" do
-    before do
-      @db = DB
-      @db.create_table!(:i1){Integer :id; Integer :group_id; Integer :amount}
-      @ds = @db[:i1].order(:id)
-      @ds.insert(:id=>1, :group_id=>1, :amount=>1)
-      @ds.insert(:id=>2, :group_id=>1, :amount=>10)
-      @ds.insert(:id=>3, :group_id=>1, :amount=>100)
-      @ds.insert(:id=>4, :group_id=>2, :amount=>1000)
-      @ds.insert(:id=>5, :group_id=>2, :amount=>10000)
-      @ds.insert(:id=>6, :group_id=>2, :amount=>100000)
-    end
-    after do
-      @db.drop_table?(:i1)
-    end
-
-    it "should give correct results for window functions" do
-      @ds.window(:win, :partition=>:group_id, :order=>:id).select(:id){sum(:amount).over(:window=>win)}.all.
-        must_equal [{:sum=>1, :id=>1}, {:sum=>11, :id=>2}, {:sum=>111, :id=>3}, {:sum=>1000, :id=>4}, {:sum=>11000, :id=>5}, {:sum=>111000, :id=>6}]
-      @ds.window(:win, :partition=>:group_id).select(:id){sum(:amount).over(:window=>win, :order=>id)}.all.
-        must_equal [{:sum=>1, :id=>1}, {:sum=>11, :id=>2}, {:sum=>111, :id=>3}, {:sum=>1000, :id=>4}, {:sum=>11000, :id=>5}, {:sum=>111000, :id=>6}]
-      @ds.window(:win, {}).select(:id){sum(:amount).over(:window=>:win, :order=>id)}.all.
-        must_equal [{:sum=>1, :id=>1}, {:sum=>11, :id=>2}, {:sum=>111, :id=>3}, {:sum=>1111, :id=>4}, {:sum=>11111, :id=>5}, {:sum=>111111, :id=>6}]
-      @ds.window(:win, :partition=>:group_id).select(:id){sum(:amount).over(:window=>:win, :order=>id, :frame=>:all)}.all.
-        must_equal [{:sum=>111, :id=>1}, {:sum=>111, :id=>2}, {:sum=>111, :id=>3}, {:sum=>111000, :id=>4}, {:sum=>111000, :id=>5}, {:sum=>111000, :id=>6}]
     end
   end
 end
@@ -3209,6 +3267,11 @@ describe 'PostgreSQL inet/cidr types' do
 
     @db.get(Sequel.pg_inet_op('1.2.3.4/24').abbrev).must_equal '1.2.3.4/24'
     @db.get(Sequel.pg_inet_op('1.2.3.4/24').broadcast).must_equal IPAddr.new('1.2.3.255/24')
+    @db.get(Sequel.pg_inet_op('1234:3456:5678:789a:9abc:bced:edf0:f012/96').broadcast).must_equal IPAddr.new('1234:3456:5678:789a:9abc:bced::/96')
+    @db.get(Sequel.pg_inet_op('1234:3456:5678:789a:9abc:bced:edf0:f012/128').broadcast).must_equal IPAddr.new('1234:3456:5678:789a:9abc:bced:edf0:f012/128')
+    @db.get(Sequel.pg_inet_op('1234:3456:5678:789a:9abc:bced:edf0:f012/64').broadcast).must_equal IPAddr.new('1234:3456:5678:789a::/64')
+    @db.get(Sequel.pg_inet_op('1234:3456:5678:789a:9abc:bced:edf0:f012/32').broadcast).must_equal IPAddr.new('1234:3456::/32')
+    @db.get(Sequel.pg_inet_op('1234:3456:5678:789a:9abc:bced:edf0:f012/0').broadcast).must_equal IPAddr.new('::/0')
     @db.get(Sequel.pg_inet_op('1.2.3.4/24').family).must_equal 4
     @db.get(Sequel.pg_inet_op('1.2.3.4/24').host).must_equal '1.2.3.4'
     @db.get(Sequel.pg_inet_op('1.2.3.4/24').hostmask).must_equal IPAddr.new('0.0.0.255/32')
@@ -3527,16 +3590,18 @@ describe 'PostgreSQL row-valued/composite types' do
     Sequel.extension :pg_array_ops, :pg_row_ops
     @ds = @db[:person]
 
-    @db.create_table!(:address) do
+    @db.drop_table?(:company, :person, :address)
+
+    @db.create_table(:address) do
       String :street
       String :city
       String :zip
     end
-    @db.create_table!(:person) do
+    @db.create_table(:person) do
       Integer :id
       address :address
     end
-    @db.create_table!(:company) do
+    @db.create_table(:company) do
       Integer :id
       column :employees, 'person[]'
     end

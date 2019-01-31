@@ -189,6 +189,68 @@ describe Sequel::Model, "associate" do
     o.associations.must_equal(:c=>1)
   end
 
+  it "should not autoreload associations when the current foreign key value is nil" do
+    c = Class.new(Sequel::Model(Sequel::Model.db[:c]))
+    c.many_to_one :c
+    o = c.new
+    o.associations[:c] = 1
+    o[:c_id] = 2
+    o.associations[:c].must_equal 1
+
+    o = c.load({})
+    o.associations[:c] = 1
+    o[:c_id] = 2
+    o.associations[:c].must_equal 1
+  end
+
+  it "should autoreload associations when the current foreign key is nil and the current associated value is nil" do
+    c = Class.new(Sequel::Model(Sequel::Model.db[:c]))
+    c.many_to_one :c
+    o = c.new
+    o.associations[:c] = nil
+    o[:c_id] = 2
+    o.associations.must_be_empty
+
+    o = c.load({})
+    o.associations[:c] = nil
+    o[:c_id] = 2
+    o.associations.must_be_empty
+  end
+
+  it "should handle autoreloading for multiple associations when the current foreign key is nil" do
+    c = Class.new(Sequel::Model(Sequel::Model.db[:c]))
+    c.many_to_one :c
+    c.many_to_one :d, :key=>:c_id
+    o = c.new
+    o.associations[:c] = nil
+    o.associations[:d] = 1
+    o[:c_id] = nil
+    o.associations.must_equal(:c=>nil, :d=>1)
+
+    o[:c_id] = 2
+    o.associations.must_equal(:d=>1)
+
+    o[:c_id] = 2
+    o.associations.must_equal(:d=>1)
+
+    o[:c_id] = nil
+    o.associations.must_be_empty
+
+    o = c.load({:c_id=>nil})
+    o.associations[:c] = nil
+    o.associations[:d] = 1
+    o[:c_id] = nil
+    o.associations.must_equal(:c=>nil, :d=>1)
+
+    o[:c_id] = 2
+    o.associations.must_equal(:d=>1)
+
+    o[:c_id] = 2
+    o.associations.must_equal(:d=>1)
+
+    o[:c_id] = nil
+    o.associations.must_be_empty
+  end
 end
 
 describe Sequel::Model, "many_to_one" do
@@ -1020,6 +1082,37 @@ describe Sequel::Model, "one_to_one" do
     c2.parent = c1
     c1.child.must_equal c2
     DB.sqls.must_equal []
+  end
+
+  it "should have setter not unset reciprocal during save if reciprocal is the same as current" do
+    @c2.many_to_one :parent, :class => @c2, :key=>:parent_id
+    @c2.one_to_one :child, :class => @c2, :key=>:parent_id, :reciprocal=>:parent
+
+    d = @c2.new(:id => 1)
+    e = @c2.new(:id => 2)
+    e2 = @c2.new(:id => 3)
+    e3 = @c2.new(:id => 4)
+    d.associations[:parent] = e
+    e.associations[:child] = d
+    e2.associations[:child] = d
+    e3.associations[:child] = e
+    assoc = nil
+    d.define_singleton_method(:after_save) do
+      super()
+      assoc = associations
+    end
+
+    def e.set_associated_object_if_same?; true; end
+    e.child = d
+    assoc.must_equal(:parent=>e)
+
+    def e2.set_associated_object_if_same?; true; end
+    e2.child = e
+    assoc.must_equal(:parent=>nil)
+
+    d.associations.clear
+    e3.child = d
+    assoc.must_equal({})
   end
 
   it "should not add associations methods directly to class" do
@@ -4152,6 +4245,12 @@ describe "Sequel::Model Associations with clashing column names" do
   it "should not have filter by associations code break if using IN/NOT in with a set-returning function" do
     @Bar.where(Sequel::SQL::BooleanExpression.new(:IN, :foo, Sequel.function(:srf))).sql.must_equal 'SELECT * FROM bars WHERE (foo IN srf())'
     @Bar.exclude(Sequel::SQL::BooleanExpression.new(:IN, :foo, Sequel.function(:srf))).sql.must_equal 'SELECT * FROM bars WHERE (foo NOT IN srf())'
+  end
+
+  it "should have working eager graphing methods when using SQL::Identifier inside SQL::AliasedExpression" do
+    @db.fetch = {:id=>1, :object_id=>2, :f_id=>1, :f_object_id=>2}
+    @Bar.eager_graph(Sequel[:foo].as(:f)).all.map{|o| [o, o.foo]}.must_equal [[@bar, @foo]]
+    @db.sqls.must_equal ["SELECT bars.id, bars.object_id, f.id AS f_id, f.object_id AS f_object_id FROM bars LEFT OUTER JOIN foos AS f ON (f.object_id = bars.object_id)"]
   end
 
   it "should have working filter by associations with model instances" do

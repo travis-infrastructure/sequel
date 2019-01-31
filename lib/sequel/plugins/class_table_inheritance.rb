@@ -98,7 +98,7 @@ module Sequel
     #
     #   a = Executive.first
     #   a.values # {:id=>1, name=>'S', :kind=>'Executive', :num_staff=>4, :num_managers=>2}
-    #   
+    #
     # Note that when loading from a subclass, because the subclass dataset uses a subquery
     # that by default uses the same alias at the primary table, any qualified identifiers
     # should reference the subquery alias (and qualified identifiers should not be needed
@@ -198,6 +198,9 @@ module Sequel
       #               Overrides implicit table names.
       # :ignore_subclass_columns :: Array with column names as symbols that are ignored
       #                             on all sub-classes.
+      # :qualify_tables :: Boolean true to qualify automatically determined
+      #                    subclass tables with the same qualifier as their
+      #                    superclass.
       def self.configure(model, opts = OPTS)
         SingleTableInheritance.configure model, opts[:key], opts
 
@@ -207,8 +210,14 @@ module Sequel
           @cti_instance_dataset = @instance_dataset
           @cti_table_columns = columns
           @cti_table_map = opts[:table_map] || {}
-          @cti_alias = opts[:alias] || @dataset.first_source
+          @cti_alias = opts[:alias] || case source = @dataset.first_source
+          when SQL::QualifiedIdentifier
+            @dataset.unqualified_column_for(source)
+          else
+            source
+          end
           @cti_ignore_subclass_columns = opts[:ignore_subclass_columns] || []
+          @cti_qualify_tables = !!opts[:qualify_tables]
         end
       end
 
@@ -239,6 +248,13 @@ module Sequel
         # primary key column is always allowed to be duplicated
         attr_reader :cti_ignore_subclass_columns
 
+        # A boolean indicating whether or not to automatically qualify tables
+        # backing subclasses with the same qualifier as their superclass, if
+        # the superclass is qualified. Specified with the :qualify_tables
+        # option to the plugin and only applied to automatically determined
+        # table names (not to the :table_map option).
+        attr_reader :cti_qualify_tables
+
         # Freeze CTI information when freezing model class.
         def freeze
           @cti_models.freeze
@@ -250,7 +266,7 @@ module Sequel
           super
         end
 
-        Plugins.inherited_instance_variables(self, :@cti_models=>nil, :@cti_tables=>nil, :@cti_table_columns=>nil, :@cti_instance_dataset=>nil, :@cti_table_map=>nil, :@cti_alias=>nil, :@cti_ignore_subclass_columns=>nil)
+        Plugins.inherited_instance_variables(self, :@cti_models=>nil, :@cti_tables=>nil, :@cti_table_columns=>nil, :@cti_instance_dataset=>nil, :@cti_table_map=>nil, :@cti_alias=>nil, :@cti_ignore_subclass_columns=>nil, :@cti_qualify_tables=>nil)
 
         def inherited(subclass)
           ds = sti_dataset
@@ -265,10 +281,14 @@ module Sequel
           columns = nil
           if (n = subclass.name) && !n.empty?
             if table = cti_table_map[n.to_sym]
-              columns = db.from(table).columns
+              columns = db.schema(table).map(&:first)
             else
-              table = subclass.implicit_table_name
-              columns = check_non_connection_error(false){db.from(table).columns}
+              table = if cti_qualify_tables && (schema = dataset.schema_and_table(cti_table_name).first)
+                SQL::QualifiedIdentifier.new(schema, subclass.implicit_table_name)
+              else
+                subclass.implicit_table_name
+              end
+              columns = check_non_connection_error(false){db.schema(table) && db.schema(table).map(&:first)}
               table = nil if !columns || columns.empty?
             end
           end
@@ -281,6 +301,7 @@ module Sequel
             if cti_tables.length == 1
               ds = ds.select(*self.columns.map{|cc| Sequel.qualify(cti_table_name, Sequel.identifier(cc))})
             end
+            ds.send(:columns=, self.columns)
             cols = (columns - [pk]) - cti_ignore_subclass_columns
             dup_cols = cols & ds.columns
             unless dup_cols.empty?
@@ -290,6 +311,7 @@ module Sequel
             @sti_dataset = ds = ds.join(table, pk=>pk).select_append(*sel_app)
 
             ds = ds.from_self(:alias=>@cti_alias)
+            ds.send(:columns=, self.columns + cols)
 
             set_dataset(ds)
             set_columns(self.columns)

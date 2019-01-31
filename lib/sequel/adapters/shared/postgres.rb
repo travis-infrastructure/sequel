@@ -195,8 +195,8 @@ module Sequel
 
       # Set a conversion proc for the given oid.  The callable can
       # be passed either as a argument or a block.
-      def add_conversion_proc(oid, callable=Proc.new)
-        conversion_procs[oid] = callable
+      def add_conversion_proc(oid, callable=nil, &block)
+        conversion_procs[oid] = callable || block
       end
 
       # Add a conversion proc for a named type, using the given block.
@@ -1673,11 +1673,29 @@ module Sequel
         true
       end
 
+      # PostgreSQL 8.4+ supports WINDOW clause.
+      def supports_window_clause?
+        server_version >= 80400
+      end
+
       # PostgreSQL 8.4+ supports window functions
       def supports_window_functions?
         server_version >= 80400
       end
 
+      # Base support added in 8.4, offset supported added in 9.0,
+      # GROUPS and EXCLUDE support added in 11.0.
+      def supports_window_function_frame_option?(option)
+        case option
+        when :rows, :range
+          true
+        when :offset
+          server_version >= 90000
+        when :groups, :exclude
+          server_version >= 110000
+        end
+      end
+    
       # Truncates the dataset.  Returns nil.
       #
       # Options:
@@ -1700,13 +1718,6 @@ module Sequel
         else
           clone(:truncate_opts=>opts).truncate
         end
-      end
-
-      # Return a clone of the dataset with an addition named window that can be
-      # referenced in window functions. See Sequel::SQL::Window for a list of
-      # options that can be passed in.
-      def window(name, opts)
-        clone(:window=>(@opts[:window]||[]) + [[name, SQL::Window.new(opts)]])
       end
 
       protected
@@ -1898,23 +1909,6 @@ module Sequel
       def select_values_sql(sql)
         sql << "VALUES "
         expression_list_append(sql, opts[:values])
-      end
-
-      # SQL fragment for named window specifications
-      def select_window_sql(sql)
-        if ws = @opts[:window]
-          sql << " WINDOW "
-          c = false
-          co = ', '
-          as = ' AS '
-          ws.map do |name, window|
-            sql << co if c
-            literal_append(sql, name)
-            sql << as
-            literal_append(sql, window)
-            c ||= true
-          end
-        end
       end
 
       # Use WITH RECURSIVE instead of WITH if any of the CTEs is recursive

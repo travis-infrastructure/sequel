@@ -63,10 +63,13 @@ describe Sequel::Model, "tree plugin" do
     @c.dataset = @c.dataset.with_fetch([{:id=>1, :parent_id=>nil, :name=>'r'}])
     @c.roots.must_equal [@c.load(:id=>1, :parent_id=>nil, :name=>'r')]
     @db.sqls.must_equal ["SELECT * FROM nodes WHERE (parent_id IS NULL)"]
+    @c.exclude(id: 2).roots.must_equal [@c.load(:id=>1, :parent_id=>nil, :name=>'r')]
+    @db.sqls.must_equal ["SELECT * FROM nodes WHERE ((id != 2) AND (parent_id IS NULL))"]
   end
 
   it "should have roots_dataset be a dataset representing the tree's roots" do
     @c.roots_dataset.sql.must_equal "SELECT * FROM nodes WHERE (parent_id IS NULL)"
+    @c.exclude(id: 2).roots_dataset.sql.must_equal "SELECT * FROM nodes WHERE ((id != 2) AND (parent_id IS NULL))"
   end
 
   it "should have ancestors return the ancestors of the current node" do
@@ -106,6 +109,13 @@ describe Sequel::Model, "tree plugin" do
     @o.self_and_siblings.must_equal [@c.load(:id=>7, :parent_id=>1, :name=>'r2'), @o] 
     @db.sqls.must_equal ["SELECT * FROM nodes WHERE id = 1",
       "SELECT * FROM nodes WHERE (nodes.parent_id = 1)"]
+  end
+
+  it "should have self_and_siblings return the roots if the current object is a root" do
+    h = {:id=>2, :parent_id=>nil, :name=>'AA'}
+    @c.dataset = @c.dataset.with_fetch(h)
+    @c.load(h).self_and_siblings.must_equal [@c.load(h)]
+    @db.sqls.must_equal ["SELECT * FROM nodes WHERE (parent_id IS NULL)"]
   end
 
   it "should have siblings return the children of the current node's parent, except for the current node" do

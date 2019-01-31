@@ -54,6 +54,22 @@ describe "Blockless Ruby Filters" do
     @d.l(~~Sequel.|(:x, :y)).must_equal '(x OR y)'
   end
 
+  it "should not modifying boolean expression created from array if array is modified" do
+    a = [1]
+    expr = Sequel.expr(:b=>a)
+    @d.l(expr).must_equal '(b IN (1))'
+    a << 2
+    @d.l(expr).must_equal '(b IN (1))'
+  end
+
+  it "should not modifying boolean expression created from string if string is modified" do
+    a = '1'.dup
+    expr = Sequel.expr(:b=>a)
+    @d.l(expr).must_equal "(b = '1')"
+    a << '2'
+    @d.l(expr).must_equal "(b = '1')"
+  end
+
   it "should support = via Hash" do
     @d.l(:x => 100).must_equal '(x = 100)'
     @d.l(:x => 'a').must_equal '(x = \'a\')'
@@ -77,6 +93,12 @@ describe "Blockless Ruby Filters" do
     @d.l(~Sequel.expr(:x => true)).must_equal '(x IS NOT TRUE)'
     @d.l(~Sequel.expr(:x => false)).must_equal '(x IS NOT FALSE)'
     @d.l(~Sequel.expr(:x => nil)).must_equal '(x IS NOT NULL)'
+  end
+
+  it "should use NOT for inverting boolean expressions where right hand side is function or literal strings" do
+    @d.l(~Sequel.expr(:x => Sequel.function(:any))).must_equal 'NOT (x = any())'
+    @d.l(~Sequel.expr(:x => Sequel.lit('any()'))).must_equal 'NOT (x = any())'
+    @d.l(~Sequel.expr(:x => Sequel.lit('any(?)', 1))).must_equal 'NOT (x = any(1))'
   end
   
   it "should support = and similar operations via =~ method" do
@@ -583,16 +605,73 @@ describe Sequel::SQL::VirtualRow do
     @d.l{count.function.*.over}.must_equal 'count(*) OVER ()'
   end
 
-  it "should handle method.function.over(:frame=>:all) as a window function call" do
+  it "should handle method.function.over(:frame=>:all) as a window function call with frame for all rows" do
     @d.l{rank.function.over(:frame=>:all)}.must_equal 'rank() OVER (ROWS BETWEEN UNBOUNDED PRECEDING AND UNBOUNDED FOLLOWING)'
   end
 
-  it "should handle method.function.over(:frame=>:rows) as a window function call" do
+  it "should handle method.function.over(:frame=>:rows) as a window function call with frame for all rows before current row" do
     @d.l{rank.function.over(:frame=>:rows)}.must_equal 'rank() OVER (ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW)'
   end
 
-  it "should handle method.function.over(:frame=>'some string') as a window function call" do
+  it "should handle method.function.over(:frame=>:groups) as a window function call with frame for all groups before current row" do
+    @d.l{rank.function.over(:frame=>:groups)}.must_equal 'rank() OVER (GROUPS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW)'
+  end
+
+  it "should handle method.function.over(:frame=>:range) as a window function call with frame for all groups before current row" do
+    @d.l{rank.function.over(:frame=>:range)}.must_equal 'rank() OVER (RANGE BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW)'
+  end
+
+  it "should handle window function with :frame hash argument with :type option" do
+    @d.l{rank.function.over(:frame=>{:type=>:rows, :start=>:preceding})}.must_equal 'rank() OVER (ROWS UNBOUNDED PRECEDING)'
+    @d.l{rank.function.over(:frame=>{:type=>:range, :start=>:preceding})}.must_equal 'rank() OVER (RANGE UNBOUNDED PRECEDING)'
+    @d.l{rank.function.over(:frame=>{:type=>:groups, :start=>:preceding})}.must_equal 'rank() OVER (GROUPS UNBOUNDED PRECEDING)'
+  end
+
+  it "should handle window function with :frame hash argument with :start option" do
+    @d.l{rank.function.over(:frame=>{:type=>:rows, :start=>:preceding})}.must_equal 'rank() OVER (ROWS UNBOUNDED PRECEDING)'
+    @d.l{rank.function.over(:frame=>{:type=>:rows, :start=>:following})}.must_equal 'rank() OVER (ROWS UNBOUNDED FOLLOWING)'
+    @d.l{rank.function.over(:frame=>{:type=>:rows, :start=>:current})}.must_equal 'rank() OVER (ROWS CURRENT ROW)'
+    @d.l{rank.function.over(:frame=>{:type=>:rows, :start=>1})}.must_equal 'rank() OVER (ROWS 1 PRECEDING)'
+    @d.l{rank.function.over(:frame=>{:type=>:rows, :start=>[1, :following]})}.must_equal 'rank() OVER (ROWS 1 FOLLOWING)'
+  end
+
+  it "should handle window function with :frame hash argument with :end option" do
+    @d.l{rank.function.over(:frame=>{:type=>:rows, :start=>:preceding, :end=>:preceding})}.must_equal 'rank() OVER (ROWS BETWEEN UNBOUNDED PRECEDING AND UNBOUNDED PRECEDING)'
+    @d.l{rank.function.over(:frame=>{:type=>:rows, :start=>:preceding, :end=>:following})}.must_equal 'rank() OVER (ROWS BETWEEN UNBOUNDED PRECEDING AND UNBOUNDED FOLLOWING)'
+    @d.l{rank.function.over(:frame=>{:type=>:rows, :start=>:preceding, :end=>:current})}.must_equal 'rank() OVER (ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW)'
+    @d.l{rank.function.over(:frame=>{:type=>:rows, :start=>:preceding, :end=>1})}.must_equal 'rank() OVER (ROWS BETWEEN UNBOUNDED PRECEDING AND 1 FOLLOWING)'
+    @d.l{rank.function.over(:frame=>{:type=>:rows, :start=>:preceding, :end=>[1, :preceding]})}.must_equal 'rank() OVER (ROWS BETWEEN UNBOUNDED PRECEDING AND 1 PRECEDING)'
+  end
+
+  it "should handle window function with :frame hash argument with :exclude option" do
+    @d.l{rank.function.over(:frame=>{:type=>:rows, :start=>:preceding,:exclude=>:current})}.must_equal 'rank() OVER (ROWS UNBOUNDED PRECEDING EXCLUDE CURRENT ROW)'
+    @d.l{rank.function.over(:frame=>{:type=>:rows, :start=>:preceding, :exclude=>:group})}.must_equal 'rank() OVER (ROWS UNBOUNDED PRECEDING EXCLUDE GROUP)'
+    @d.l{rank.function.over(:frame=>{:type=>:rows, :start=>:preceding, :exclude=>:ties})}.must_equal 'rank() OVER (ROWS UNBOUNDED PRECEDING EXCLUDE TIES)'
+    @d.l{rank.function.over(:frame=>{:type=>:rows, :start=>:preceding, :exclude=>:no_others})}.must_equal 'rank() OVER (ROWS UNBOUNDED PRECEDING EXCLUDE NO OTHERS)'
+  end
+
+  it "should handle window function with :frame hash argument with invalid options" do
+    proc{@d.l{rank.function.over(:frame=>{:type=>:blah, :start=>:preceding})}}.must_raise Sequel::Error
+    proc{@d.l{rank.function.over(:frame=>{:type=>:rows})}}.must_raise Sequel::Error
+    proc{@d.l{rank.function.over(:frame=>{:type=>:rows, :start=>:blah})}}.must_raise Sequel::Error
+    proc{@d.l{rank.function.over(:frame=>{:type=>:rows, :start=>[1, :blah]})}}.must_raise Sequel::Error
+    proc{@d.l{rank.function.over(:frame=>{:type=>:rows, :start=>[1, :preceding, 3]})}}.must_raise Sequel::Error
+    proc{@d.l{rank.function.over(:frame=>{:type=>:rows, :start=>:preceding, :end=>:blah})}}.must_raise Sequel::Error
+    proc{@d.l{rank.function.over(:frame=>{:type=>:rows, :start=>:preceding, :end=>[1, :blah]})}}.must_raise Sequel::Error
+    proc{@d.l{rank.function.over(:frame=>{:type=>:rows, :start=>:preceding, :end=>[1, :following, 3]})}}.must_raise Sequel::Error
+    proc{@d.l{rank.function.over(:frame=>{:type=>:rows, :start=>:preceding, :exclude=>:blah})}}.must_raise Sequel::Error
+  end
+
+  it "should handle method.function.over(:frame=>'some string') as a window function call with explicit frame" do
     @d.l{rank.function.over(:frame=>'RANGE BETWEEN 3 PRECEDING AND CURRENT ROW')}.must_equal 'rank() OVER (RANGE BETWEEN 3 PRECEDING AND CURRENT ROW)'
+  end
+
+  it "should support window functions options" do
+    @d.supports_window_function_frame_option?(:rows).must_equal true
+    @d.supports_window_function_frame_option?(:range).must_equal true
+    @d.supports_window_function_frame_option?(:groups).must_equal false
+    @d.supports_window_function_frame_option?(:offset).must_equal true
+    @d.supports_window_function_frame_option?(:exclude).must_equal false
   end
 
   it "should raise an error if an invalid :frame option is used" do
@@ -1146,6 +1225,16 @@ describe "Sequel::SQLTime" do
     Sequel::SQLTime.create(1, 2, 3).strftime('%Y-%m-%d').must_equal Date.new(2000).strftime('%Y-%m-%d')
   end
 
+  it ".parse should respect SQLTime.date setting" do
+    Sequel::SQLTime.date = Date.new(2000, 2, 3)
+    Sequel::SQLTime.parse('10:11:12').strftime('%F').must_equal "2000-02-03"
+  end
+
+  it ".parse should respect application_timezone setting" do
+    Sequel::application_timezone = :utc
+    Sequel::SQLTime.parse('10:11:12').utc_offset.must_equal 0
+  end
+
   it "#inspect should show class and time by default" do
     Sequel::SQLTime.create(1, 2, 3).inspect.must_equal "#<Sequel::SQLTime 01:02:03>"
     Sequel::SQLTime.create(13, 24, 35).inspect.must_equal "#<Sequel::SQLTime 13:24:35>"
@@ -1182,7 +1271,7 @@ describe "Sequel::SQL::Wrapper" do
     @ds.literal(s**1).must_equal "power(foo, 1)"
     @ds.literal(s & true).must_equal "(foo AND 't')"
     @ds.literal(s < 1).must_equal "(foo < 1)"
-    @ds.literal(s.sql_subscript(1)).must_equal "foo[1]"
+    @ds.literal(s.sql_subscript(1)).must_equal "(foo)[1]"
     @ds.literal(s.like('a')).must_equal "(foo LIKE 'a' ESCAPE '\\')"
     @ds.literal(s.as(:a)).must_equal "foo AS a"
     @ds.literal(s.cast(Integer)).must_equal "CAST(foo AS integer)"
@@ -1212,6 +1301,18 @@ describe Sequel::SQL::Subscript do
   it "should have [] return a new nested subscript" do
     s = @s[2]
     @ds.literal(s).must_equal 'a[1][2]'
+  end
+
+  it "should not wrap identifiers in parentheses" do
+    @ds.literal(Sequel::SQL::Subscript.new(:a, [1])).must_equal 'a[1]'
+    @ds.literal(Sequel::SQL::Subscript.new(Sequel[:a], [1])).must_equal 'a[1]'
+    @ds.literal(Sequel::SQL::Subscript.new(Sequel[:a][:b], [1])).must_equal 'a.b[1]'
+  end
+
+  it "should wrap other expression types in parentheses" do
+    @ds.literal(Sequel::SQL::Subscript.new(Sequel.function('a'), [1])).must_equal '(a())[1]'
+    @ds.literal(Sequel::SQL::Subscript.new(Sequel.lit('a'), [1])).must_equal '(a)[1]'
+    @ds.literal(Sequel::SQL::Subscript.new(Sequel.lit('a(?)', 2), [1])).must_equal '(a(2))[1]'
   end
 end
 

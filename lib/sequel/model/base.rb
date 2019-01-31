@@ -324,14 +324,14 @@ module Sequel
       # Any public methods in the dataset module will have class methods created that
       # call the method on the dataset, assuming that the class method is not already
       # defined.
-      def dataset_module(mod = nil)
+      def dataset_module(mod = nil, &block)
         if mod
-          raise Error, "can't provide both argument and block to Model.dataset_module" if block_given?
+          raise Error, "can't provide both argument and block to Model.dataset_module" if block
           dataset_extend(mod)
           mod
         else
           @dataset_module ||= dataset_module_class.new(self)
-          @dataset_module.module_eval(&Proc.new) if block_given?
+          @dataset_module.module_eval(&block) if block
           dataset_extend(@dataset_module)
           @dataset_module
         end
@@ -765,9 +765,11 @@ module Sequel
 
       # Create a column accessor for a column with a method name that is hard to use in ruby code.
       def def_bad_column_accessor(column)
+        im = instance_methods
         overridable_methods_module.module_eval do
-          define_method(column){self[column]}
-          define_method("#{column}="){|v| self[column] = v}
+          meth = :"#{column}="
+          define_method(column){self[column]} unless im.include?(column)
+          define_method(meth){|v| self[column] = v} unless im.include?(meth)
         end
       end
   
@@ -779,7 +781,7 @@ module Sequel
         bad_columns.each{|x| def_bad_column_accessor(x)}
         im = instance_methods
         columns.each do |column|
-          meth = "#{column}="
+          meth = :"#{column}="
           overridable_methods_module.module_eval("def #{column}; self[:#{column}] end", __FILE__, __LINE__) unless im.include?(column)
           overridable_methods_module.module_eval("def #{meth}(v); self[:#{column}] = v end", __FILE__, __LINE__) unless im.include?(meth)
         end
@@ -1103,16 +1105,33 @@ module Sequel
         eql?(obj)
       end
   
-      # If pk is not nil, true only if the objects have the same class and pk.
-      # If pk is nil, false.
+      # Case equality.  By default, checks equality of the primary key value, see
+      # pk_equal?.
       #
-      #   Artist[1] === Artist[1] # true
-      #   Artist.new === Artist.new # false
-      #   Artist[1].set(:name=>'Bob') == Artist[1] # => true
+      #   Artist[1] === Artist[1] # => true
+      #   Artist.new === Artist.new # => false
+      #   Artist[1].set(:name=>'Bob') === Artist[1] # => true
       def ===(obj)
-        pk.nil? ? false : (obj.class == model) && (obj.pk == pk)
+        case pkv = pk
+        when nil
+          return false
+        when Array
+          return false if pk.any?(&:nil?)
+        end
+
+        (obj.class == model) && (obj.pk == pkv)
       end
-  
+
+      # If the receiver has a primary key value, returns true if the objects have
+      # the same class and primary key value.
+      # If the receiver's primary key value is nil or is an array containing
+      # nil, returns false.
+      #
+      #   Artist[1].pk_equal?(Artist[1]) # => true
+      #   Artist.new.pk_equal?(Artist.new) # => false
+      #   Artist[1].set(:name=>'Bob').pk_equal?(Artist[1]) # => true
+      alias pk_equal? ===
+
       # class is defined in Object, but it is also a keyword,
       # and since a lot of instance methods call class methods,
       # this alias makes it so you can use model instead of
@@ -1287,11 +1306,11 @@ module Sequel
       #     a.update(:name=>'A')
       #   end
       #
-      #  a = Artist[2]
-      #  Artist.db.transaction do
-      #    a.lock!('FOR NO KEY UPDATE')
-      #    a.update(:name=>'B')
-      #  end
+      #   a = Artist[2]
+      #   Artist.db.transaction do
+      #     a.lock!('FOR NO KEY UPDATE')
+      #     a.update(:name=>'B')
+      #   end
       def lock!(style=:update)
         _refresh(this.lock_style(style)) unless new?
         self
@@ -1415,9 +1434,9 @@ module Sequel
       # is valid and before hooks execute successfully. Fails if:
       #
       # * the record is not valid, or
-      # * before_save returns false, or
-      # * the record is new and before_create returns false, or
-      # * the record is not new and before_update returns false.
+      # * before_save calls cancel_action, or
+      # * the record is new and before_create calls cancel_action, or
+      # * the record is not new and before_update calls cancel_action.
       #
       # If +save+ fails and either raise_on_save_failure or the
       # :raise_on_failure option is true, it raises ValidationFailed
@@ -1439,7 +1458,7 @@ module Sequel
       def save(opts=OPTS)
         raise Sequel::Error, "can't save frozen object" if frozen?
         set_server(opts[:server]) if opts[:server] 
-        unless checked_save_failure(opts){_valid?(opts)}
+        unless _save_valid?(opts)
           raise(ValidationFailed.new(self)) if raise_on_failure?(opts)
           return
         end
@@ -1534,6 +1553,15 @@ module Sequel
         super
       end
   
+      # Skip all validation of the object on the next call to #save,
+      # including the running of validation hooks. This is designed for
+      # and should only be used in cases where #valid? is called before
+      # saving and the <tt>validate: false</tt> option cannot be passed to
+      # #save.
+      def skip_validation_on_next_save!
+        @skip_validation_on_next_save = true
+      end
+
       # Returns (naked) dataset that should return only this instance.
       #
       #   Artist[1].this
@@ -1551,8 +1579,8 @@ module Sequel
         update_restricted(hash, :default)
       end
   
-      # Update the instances values by calling +set_fields+ with the arguments, then
-      # saves any changes to the record.  Returns self.
+      # Update the instance's values by calling set_fields with the arguments, then
+      # calls save_changes.
       #
       #   artist.update_fields({name: 'Jim'}, [:name])
       #   # UPDATE artists SET name = 'Jim' WHERE (id = 1)
@@ -1790,6 +1818,19 @@ module Sequel
         cc = changed_columns
         Array(primary_key).each{|x| v.delete(x) unless cc.include?(x)}
         v
+      end
+
+      # Validate the object if validating on save. Skips validation
+      # completely (including validation hooks) if
+      # skip_validation_on_save! has been called on the object,
+      # resetting the flag so that future saves will validate.
+      def _save_valid?(opts)
+        if @skip_validation_on_next_save
+          @skip_validation_on_next_save = false
+          return true
+        end
+
+        checked_save_failure(opts){_valid?(opts)}
       end
 
       # Call _update with the given columns, if any are present.

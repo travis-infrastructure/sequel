@@ -178,9 +178,27 @@ module Sequel
       true
     end
     
+    # Whether the dataset supports the WINDOW clause to define windows used by multiple
+    # window functions, false by default.
+    def supports_window_clause?
+      false
+    end
+
     # Whether the dataset supports window functions, false by default.
     def supports_window_functions?
       false
+    end
+    
+    # Whether the dataset supports the given window function option.  True by default.
+    # This should only be called if supports_window_functions? is true. Possible options
+    # are :rows, :range, :groups, :offset, :exclude.
+    def supports_window_function_frame_option?(option)
+      case option
+      when :rows, :range, :offset
+        true
+      else
+        false
+      end
     end
     
     # Whether the dataset supports WHERE TRUE (or WHERE 1 for databases that
@@ -200,6 +218,11 @@ module Sequel
     # Whether the dataset needs ESCAPE for LIKE for correct behavior.
     def requires_like_escape?
       true
+    end
+
+    # Whether ORDER BY col NULLS FIRST/LAST must be emulated.
+    def requires_emulating_nulls_first?
+      false
     end
 
     # Whether common table expressions are supported in UNION/INTERSECT/EXCEPT clauses.

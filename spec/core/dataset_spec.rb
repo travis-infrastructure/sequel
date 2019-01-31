@@ -48,7 +48,7 @@ describe "Dataset#clone" do
   end
   
   it "should create an exact copy of the dataset" do
-    @dataset = @dataset.with_row_proc(Proc.new{|r| r})
+    @dataset = @dataset.with_row_proc(proc{|r| r})
     clone = @dataset.clone
     @dataset.dup.must_be_same_as @dataset
 
@@ -63,7 +63,7 @@ describe "Dataset#clone" do
   end
   
   it "should create an exact copy of the dataset when given an empty hash" do
-    @dataset = @dataset.with_row_proc(Proc.new{|r| r})
+    @dataset = @dataset.with_row_proc(proc{|r| r})
     clone = @dataset.clone({})
 
     clone.object_id.wont_equal @dataset.object_id
@@ -1411,6 +1411,10 @@ describe "Dataset#order" do
     @dataset.order(Sequel.asc(:name, :nulls=>:last), Sequel.desc(:price, :nulls=>:first)).sql.must_equal 'SELECT * FROM test ORDER BY name ASC NULLS LAST, price DESC NULLS FIRST'
   end
   
+  it "should emulate :nulls options for asc and desc if not natively supported" do
+    @dataset.with_extend{def requires_emulating_nulls_first?; true end}.order(Sequel.asc(:name, :nulls=>:last), Sequel.desc(:price, :nulls=>:first)).sql.must_equal 'SELECT * FROM test ORDER BY (CASE WHEN (name IS NULL) THEN 2 ELSE 1 END), name ASC, (CASE WHEN (price IS NULL) THEN 0 ELSE 1 END), price DESC'
+  end
+  
   it "should override a previous ordering" do
     @dataset.order(:name).order(:stamp).sql.must_equal 'SELECT * FROM test ORDER BY stamp'
   end
@@ -1873,7 +1877,7 @@ end
 
 describe "Dataset#naked" do
   it "should returned clone dataset without row_proc" do
-    d = Sequel.mock.dataset.with_row_proc(Proc.new{|r| r})
+    d = Sequel.mock.dataset.with_row_proc(proc{|r| r})
     d.naked.row_proc.must_be_nil
     d.row_proc.wont_be_nil
   end
@@ -2330,6 +2334,11 @@ describe "Dataset#from_self" do
     @ds.from_self(:alias=>:some_name, :column_aliases=>[:c1, :c2]).sql.must_equal 'SELECT * FROM (SELECT name FROM test LIMIT 1) AS some_name(c1, c2)'
   end
   
+  it "should use the user-specified alias" do
+    @ds.from_self(:alias=>:some_name).sql.must_equal 'SELECT * FROM (SELECT name FROM test LIMIT 1) AS some_name'
+    @ds.from_self(:alias=>:some_name1).sql.must_equal 'SELECT * FROM (SELECT name FROM test LIMIT 1) AS some_name1'
+  end
+  
   it "should use the user-specified alias for joins" do
     @ds.from_self(:alias=>:some_name).inner_join(:posts, :alias=>:name).sql.must_equal \
       'SELECT * FROM (SELECT name FROM test LIMIT 1) AS some_name INNER JOIN posts ON (posts.alias = some_name.name)'
@@ -2337,6 +2346,14 @@ describe "Dataset#from_self" do
   
   it "should not remove non-SQL options such as :server" do
     @ds.server(:blah).from_self(:alias=>:some_name).opts[:server].must_equal :blah
+  end
+
+  it "should work correctly when a delayed evaluation is used " do
+    a = true
+    ds = @ds.where(Sequel.delay{a}).from_self
+    ds.sql.must_equal "SELECT * FROM (SELECT name FROM test WHERE 't' LIMIT 1) AS t1"
+    a = false
+    ds.sql.must_equal "SELECT * FROM (SELECT name FROM test WHERE 'f' LIMIT 1) AS t1"
   end
 
   it "should hoist WITH clauses in current dataset if dataset doesn't support WITH in subselect" do
@@ -3825,7 +3842,7 @@ end
 describe "Dataset prepared statements and bound variables " do
   before do
     @db = Sequel.mock
-    @ds = @db[:items].with_extend{def insert_select_sql(*v) "#{insert_sql(*v)} RETURNING *" end}
+    @ds = @db[:items].with_extend{def insert_select_sql(*v) insert_sql(*v) << " RETURNING *" end}
   end
   
   it "#call should take a type and bind hash and interpolate it" do
@@ -3836,6 +3853,7 @@ describe "Dataset prepared statements and bound variables " do
     @ds.filter(:num=>:$n).call([:to_hash, :a, :b], :n=>1)
     @ds.filter(:num=>:$n).call([:to_hash_groups, :a, :b], :n=>1)
     @ds.filter(:num=>:$n).call(:first, :n=>1)
+    @ds.filter(:num=>:$n).call(:single_value, :n=>1)
     @ds.filter(:num=>:$n).call(:delete, :n=>1)
     @ds.filter(:num=>:$n).call(:update, {:n=>1, :n2=>2}, :num=>:$n2)
     @ds.call(:insert, {:n=>1}, :num=>:$n)
@@ -3848,6 +3866,7 @@ describe "Dataset prepared statements and bound variables " do
       'SELECT * FROM items WHERE (num = 1)',
       'SELECT * FROM items WHERE (num = 1)',
       'SELECT * FROM items WHERE (num = 1)',
+      'SELECT * FROM items WHERE (num = 1) LIMIT 1',
       'SELECT * FROM items WHERE (num = 1) LIMIT 1',
       'DELETE FROM items WHERE (num = 1)',
       'UPDATE items SET num = 2 WHERE (num = 1)',
@@ -3865,12 +3884,14 @@ describe "Dataset prepared statements and bound variables " do
     pss << @ds.filter(:num=>:$n).prepare([:to_hash, :a, :b], :sh)
     pss << @ds.filter(:num=>:$n).prepare([:to_hash_groups, :a, :b], :shg)
     pss << @ds.filter(:num=>:$n).prepare(:first, :fn)
+    pss << @ds.filter(:num=>:$n).prepare(:single_value, :svn)
     pss << @ds.filter(:num=>:$n).prepare(:delete, :dn)
     pss << @ds.filter(:num=>:$n).prepare(:update, :un, :num=>:$n2)
     pss << @ds.prepare(:insert, :in, :num=>:$n)
+    pss << @ds.prepare(:insert_pk, :inp, :num=>:$n)
     pss << @ds.prepare(:insert_select, :ins, :num=>:$n)
-    @db.prepared_statements.keys.sort_by{|k| k.to_s}.must_equal [:ah, :dn, :en, :fn, :in, :ins, :sh, :shg, :sm, :sn, :un]
-    [:en, :sn, :sm, :ah, :sh, :shg, :fn, :dn, :un, :in, :ins].each_with_index{|x, i| @db.prepared_statements[x].must_equal pss[i]}
+    @db.prepared_statements.keys.sort_by{|k| k.to_s}.must_equal [:ah, :dn, :en, :fn, :in, :inp, :ins, :sh, :shg, :sm, :sn, :svn, :un]
+    [:en, :sn, :sm, :ah, :sh, :shg, :fn, :svn, :dn, :un, :in, :inp, :ins].each_with_index{|x, i| @db.prepared_statements[x].must_equal pss[i]}
     @db.call(:en, :n=>1){}
     @db.call(:sn, :n=>1)
     @db.call(:sm, :n=>1)
@@ -3878,9 +3899,11 @@ describe "Dataset prepared statements and bound variables " do
     @db.call(:sh, :n=>1)
     @db.call(:shg, :n=>1)
     @db.call(:fn, :n=>1)
+    @db.call(:svn, :n=>1)
     @db.call(:dn, :n=>1)
     @db.call(:un, :n=>1, :n2=>2)
     @db.call(:in, :n=>1)
+    @db.call(:inp, :n=>1)
     @db.call(:ins, :n=>1)
     @db.sqls.must_equal [
       'SELECT * FROM items WHERE (num = 1)',
@@ -3890,18 +3913,31 @@ describe "Dataset prepared statements and bound variables " do
       'SELECT * FROM items WHERE (num = 1)',
       'SELECT * FROM items WHERE (num = 1)',
       'SELECT * FROM items WHERE (num = 1) LIMIT 1',
+      'SELECT * FROM items WHERE (num = 1) LIMIT 1',
       'DELETE FROM items WHERE (num = 1)',
       'UPDATE items SET num = 2 WHERE (num = 1)',
+      'INSERT INTO items (num) VALUES (1)',
       'INSERT INTO items (num) VALUES (1)',
       'INSERT INTO items (num) VALUES (1) RETURNING *']
   end
     
+  it "should give correct results for recursive WITH" do
+    ps = @ds.with_extend{def supports_cte?(type=nil) true end}.
+      select(Sequel[:i].as(:id), Sequel[:pi].as(:parent_id)).
+      with_recursive(:t, @ds.filter(:parent_id=>:$n), @ds.join(:t, :i=>:parent_id).filter(Sequel[:t][:i]=>:parent_id).
+      select(Sequel[:i1][:id], Sequel[:i1][:parent_id]), :args=>[:i, :pi]).
+      order(:id).
+      prepare(:select, :cte_sel)
+    ps.call(:n=>1).must_equal []
+    @db.sqls.must_equal ["WITH t(i, pi) AS (SELECT * FROM items WHERE (parent_id = 1) UNION ALL SELECT i1.id, i1.parent_id FROM items INNER JOIN t ON (t.i = items.parent_id) WHERE (t.i = parent_id)) SELECT i AS id, pi AS parent_id FROM items ORDER BY id"]
+  end
+
   it "#call and #prepare should handle returning" do
     @ds = @ds.with_extend do
       def supports_returning?(_) true end
-      def insert_sql(*v) "#{super(*v)} RETURNING *" end
-      def update_sql(*v) "#{super(*v)} RETURNING *" end
-      def delete_sql; "#{super()} RETURNING *" end
+      def insert_sql(*) super << " RETURNING *" end
+      def update_sql(*) super << " RETURNING *" end
+      def delete_sql; super << " RETURNING *" end
     end
     @ds = @ds.returning
     @ds.call(:insert, {:n=>1}, :num=>:$n)
@@ -4010,17 +4046,18 @@ describe Sequel::Dataset::UnnumberedArgumentMapper do
       def execute_insert(sql, opts={}, &block)
         super(sql, opts.merge({:arguments=>bind_arguments}), &block)
       end
+      def prepared_statement_modules
+        [Sequel::Dataset::UnnumberedArgumentMapper]
+      end
     end
     @ps = []
     @ps << @ds.prepare(:select, :s)
     @ps << @ds.prepare(:all, :a)
     @ps << @ds.prepare(:first, :f)
+    @ps << @ds.prepare(:single_value, :sv)
     @ps << @ds.prepare(:delete, :d)
     @ps << @ds.prepare(:insert, :i, :num=>:$n)
     @ps << @ds.prepare(:update, :u, :num=>:$n)
-    @ps.map! do |p|
-      p.with_extend(Sequel::Dataset::UnnumberedArgumentMapper)
-    end
   end
 
   it "#inspect should show the actual SQL submitted to the database" do
@@ -4031,6 +4068,7 @@ describe Sequel::Dataset::UnnumberedArgumentMapper do
     @ps.each{|p| p.prepared_sql; p.call(:n=>1)}
     @db.sqls.must_equal ["SELECT * FROM items WHERE (num = ?) -- args: [1]",
       "SELECT * FROM items WHERE (num = ?) -- args: [1]",
+      "SELECT * FROM items WHERE (num = ?) LIMIT 1 -- args: [1]",
       "SELECT * FROM items WHERE (num = ?) LIMIT 1 -- args: [1]",
       "DELETE FROM items WHERE (num = ?) -- args: [1]",
       "INSERT INTO items (num) VALUES (?) -- args: [1]",
@@ -4189,7 +4227,7 @@ describe "Sequel::Dataset#qualify" do
   end
 end
 
-describe "Sequel::Dataset #with and #with_recursive" do
+describe "Dataset#with and #with_recursive" do
   before do
     @db = Sequel.mock
     @ds = @db[:t].with_extend{def supports_cte?(*) true end}
@@ -4248,6 +4286,27 @@ describe "Sequel::Dataset #with and #with_recursive" do
     end
     @ds.with(:t, @ds.from(:s).with(:s, @ds.from(:r))).sql.must_equal 'WITH s AS (SELECT * FROM r), t AS (SELECT * FROM s) SELECT * FROM t'
     @ds.with_recursive(:t, @ds.from(:s).with(:s, @ds.from(:r)), @ds.from(:q).with(:q, @ds.from(:p))).sql.must_equal 'WITH s AS (SELECT * FROM r), q AS (SELECT * FROM p), t AS (SELECT * FROM s UNION ALL SELECT * FROM q) SELECT * FROM t'
+  end
+end
+
+describe "Dataset#window" do
+  before do
+    @db = Sequel.mock
+    @ds = @db[:t].with_extend do
+      Sequel::Dataset.def_sql_method(self, :select, %w'select columns from window')
+      def supports_window_clause?; true end
+      def supports_window_functions?; true end
+    end
+  end
+  
+  it "should not support window clause by default" do
+    @db.dataset.supports_window_clause?.must_equal false
+  end
+
+  it "should take a name and hash of window options" do
+    ds = @ds.window(:w, :partition=>:a, :order=>:b)
+    ds.sql.must_equal 'SELECT * FROM t WINDOW w AS (PARTITION BY a ORDER BY b)'
+    ds.window(:w2, :partition=>:c, :order=>:d).sql.must_equal 'SELECT * FROM t WINDOW w AS (PARTITION BY a ORDER BY b), w2 AS (PARTITION BY c ORDER BY d)'
   end
 end
 

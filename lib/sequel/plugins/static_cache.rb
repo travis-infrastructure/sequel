@@ -24,6 +24,7 @@ module Sequel
     # * Primary key lookups (e.g. Model[1])
     # * Model.all
     # * Model.each
+    # * Model.first (without block, only supporting no arguments or single integer argument)
     # * Model.count (without an argument or block)
     # * Model.map
     # * Model.as_hash
@@ -54,6 +55,7 @@ module Sequel
     # Now if you +#dup+ a Model object (the resulting object is not frozen), you
     # will be able to update and save the duplicate.
     # Note the caveats around your responsibility to update the cache still applies.
+    # You can update the cache via `.load_cache` method.
     module StaticCache
       # Populate the static caches when loading the plugin. Options:
       # :frozen :: Whether retrieved model objects are frozen.  The default is true,
@@ -70,13 +72,25 @@ module Sequel
         # A frozen ruby hash holding all of the model's frozen instances, keyed by frozen primary key.
         attr_reader :cache
 
-        # An array of all of the model's frozen instances, without issuing a database
-        # query.
-        def all
-          if @static_cache_frozen
-            @all.dup
+        # An array of all of the model's instances, without issuing a database
+        # query. If a block is given, yields each instance to the block.
+        def all(&block)
+          array = @static_cache_frozen ? @all.dup : to_a
+          array.each(&block) if block
+          array
+        end
+
+        # If a block is given, multiple arguments are given, or a single
+        # non-Integer argument is given, performs the default behavior of
+        # issuing a database query.  Otherwise, uses the cached values
+        # to return either the first cached instance (no arguments) or an
+        # array containing the number of instances specified (single integer
+        # argument).
+        def first(*args)
+          if block_given? || args.length > 1 || (args.length == 1 && !args[0].is_a?(Integer))
+            super
           else
-            map{|o| o}
+            @all.first(*args)
           end
         end
 
@@ -194,14 +208,6 @@ module Sequel
           !@static_cache_frozen
         end
 
-        private
-
-        # Return the frozen object with the given pk, or nil if no such object exists
-        # in the cache, without issuing a database query.
-        def primary_key_lookup(pk)
-          static_cache_object(cache[pk])
-        end
-
         # Reload the cache for this model by retrieving all of the instances in the dataset
         # freezing them, and populating the cached array and hash.
         def load_cache
@@ -213,6 +219,14 @@ module Sequel
           end
           @all = a.freeze
           @cache = h.freeze
+        end
+
+        private
+
+        # Return the frozen object with the given pk, or nil if no such object exists
+        # in the cache, without issuing a database query.
+        def primary_key_lookup(pk)
+          static_cache_object(cache[pk])
         end
 
         # If frozen: false is not used, just return the argument. Otherwise,

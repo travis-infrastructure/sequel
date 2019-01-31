@@ -3,9 +3,11 @@
 module Sequel
   # The major version of Sequel.  Only bumped for major changes.
   MAJOR = 5
+
   # The minor version of Sequel.  Bumped for every non-patch level
   # release, generally around once a month.
-  MINOR = 9
+  MINOR = 16
+
   # The tiny version of Sequel.  Usually 0, only bumped for bugfix
   # releases that fix regressions from previous versions.
   TINY  = 0

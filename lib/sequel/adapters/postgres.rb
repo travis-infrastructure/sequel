@@ -15,6 +15,12 @@ begin
   end
 
   Sequel::Postgres::USES_PG = true
+  if defined?(PG::TypeMapByClass)
+    type_map = Sequel::Postgres::PG_QUERY_TYPE_MAP = PG::TypeMapByClass.new
+    type_map[Integer] = PG::TextEncoder::Integer.new
+    type_map[FalseClass] = type_map[TrueClass] = PG::TextEncoder::Boolean.new
+    type_map[Float] = PG::TextEncoder::Float.new
+  end
 rescue LoadError => e 
   begin
     require 'postgres-pr/postgres-compat'
@@ -167,6 +173,15 @@ module Sequel
         end
       end
 
+      # Call a procedure with the given name and arguments.  Returns a hash if the procedure
+      # returns a value, and nil otherwise.  Example:
+      #
+      #   DB.call_procedure(:foo, 1, 2)
+      #   # CALL foo(1, 2)
+      def call_procedure(name, *args)
+        dataset.send(:call_procedure, name, args)
+      end
+
       # Connects to the database.  In addition to the standard database
       # options, using the :encoding or :charset option changes the
       # client encoding for the connection, :connect_timeout is a
@@ -179,7 +194,7 @@ module Sequel
         if USES_PG
           connection_params = {
             :host => opts[:host],
-            :port => opts[:port] || 5432,
+            :port => opts[:port],
             :dbname => opts[:database],
             :user => opts[:user],
             :password => opts[:password],
@@ -188,7 +203,7 @@ module Sequel
             :sslrootcert => opts[:sslrootcert]
           }.delete_if { |key, value| blank_object?(value) }
           connection_params.merge!(opts[:driver_options]) if opts[:driver_options]
-          conn = Adapter.connect(connection_params)
+          conn = Adapter.connect(opts[:conn_str] || connection_params)
 
           conn.instance_variable_set(:@prepared_statements, {})
 
@@ -211,6 +226,9 @@ module Sequel
         end
 
         conn.instance_variable_set(:@db, self)
+        if USES_PG && conn.respond_to?(:type_map_for_queries=) && defined?(PG_QUERY_TYPE_MAP)
+          conn.type_map_for_queries = PG_QUERY_TYPE_MAP
+        end
 
         if encoding = opts[:encoding] || opts[:charset]
           if conn.respond_to?(:set_client_encoding)
@@ -663,11 +681,6 @@ module Sequel
             end
             LiteralString.new("#{prepared_arg_placeholder}#{i}")
           end
-
-          # Always assume a prepared argument.
-          def prepared_arg?(k)
-           true
-          end
         end
 
         BindArgumentMethods = prepared_statements_module(:bind, [ArgumentMapper], %w'execute execute_dui')
@@ -692,6 +705,15 @@ module Sequel
       
       private
       
+      # Generate and execute a procedure call.
+      def call_procedure(name, args)
+        sql = String.new
+        sql << "CALL "
+        identifier_append(sql, name)
+        literal_append(sql, args)
+        with_sql_first(sql)
+      end
+
       # Use a cursor to fetch groups of records at a time, yielding them to the block.
       def cursor_fetch_rows(sql)
         server_opts = {:server=>@opts[:server] || :read_only}

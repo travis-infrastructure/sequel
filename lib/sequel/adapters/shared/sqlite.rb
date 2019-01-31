@@ -177,7 +177,10 @@ module Sequel
       # needed for drop column.
       def apply_alter_table(table, ops)
         fks = fetch("PRAGMA foreign_keys")
-        run "PRAGMA foreign_keys = 0" if fks
+        if fks
+          run "PRAGMA foreign_keys = 0"
+          run "PRAGMA legacy_alter_table = 1" if sqlite_version >= 32600
+        end
         transaction do 
           if ops.length > 1 && ops.all?{|op| op[:op] == :add_constraint || op[:op] == :set_column_null}
             null_ops, ops = ops.partition{|op| op[:op] == :set_column_null}
@@ -196,7 +199,10 @@ module Sequel
         end
         remove_cached_schema(table)
       ensure
-        run "PRAGMA foreign_keys = 1" if fks
+        if fks
+          run "PRAGMA foreign_keys = 1"
+          run "PRAGMA legacy_alter_table = 0" if sqlite_version >= 32600
+        end
       end
 
       # SQLite supports limited table modification.  You can add a column
@@ -217,8 +223,12 @@ module Sequel
           ocp = lambda{|oc| oc.delete_if{|c| c.to_s == op[:name].to_s}}
           duplicate_table(table, :old_columns_proc=>ocp){|columns| columns.delete_if{|s| s[:name].to_s == op[:name].to_s}}
         when :rename_column
-          ncp = lambda{|nc| nc.map!{|c| c.to_s == op[:name].to_s ? op[:new_name] : c}}
-          duplicate_table(table, :new_columns_proc=>ncp){|columns| columns.each{|s| s[:name] = op[:new_name] if s[:name].to_s == op[:name].to_s}}
+          if sqlite_version >= 32500
+            super
+          else
+            ncp = lambda{|nc| nc.map!{|c| c.to_s == op[:name].to_s ? op[:new_name] : c}}
+            duplicate_table(table, :new_columns_proc=>ncp){|columns| columns.each{|s| s[:name] = op[:new_name] if s[:name].to_s == op[:name].to_s}}
+          end
         when :set_column_default
           duplicate_table(table){|columns| columns.each{|s| s[:default] = op[:default] if s[:name].to_s == op[:name].to_s}}
         when :set_column_null
@@ -299,7 +309,7 @@ module Sequel
       DATABASE_ERROR_REGEXPS = {
         /(is|are) not unique\z|PRIMARY KEY must be unique\z|UNIQUE constraint failed: .+\z/ => UniqueConstraintViolation,
         /foreign key constraint failed\z/i => ForeignKeyConstraintViolation,
-        /\ACHECK constraint failed/ => CheckConstraintViolation,
+        /\A(SQLITE ERROR 275 \(CONSTRAINT_CHECK\) : )?CHECK constraint failed/ => CheckConstraintViolation,
         /\A(SQLITE ERROR 19 \(CONSTRAINT\) : )?constraint failed\z/ => ConstraintViolation,
         /may not be NULL\z|NOT NULL constraint failed: .+\z/ => NotNullConstraintViolation,
         /\ASQLITE ERROR \d+ \(\) : CHECK constraint failed: / => CheckConstraintViolation
@@ -500,7 +510,7 @@ module Sequel
       EXTRACT_MAP.each_value(&:freeze)
 
       Dataset.def_sql_method(self, :delete, [['if db.sqlite_version >= 30803', %w'with delete from where'], ["else", %w'delete from where']])
-      Dataset.def_sql_method(self, :insert, [['if db.sqlite_version >= 30803', %w'with insert conflict into columns values'], ["else", %w'insert conflict into columns values']])
+      Dataset.def_sql_method(self, :insert, [['if db.sqlite_version >= 30803', %w'with insert conflict into columns values on_conflict'], ["else", %w'insert conflict into columns values']])
       Dataset.def_sql_method(self, :select, [['if opts[:values]', %w'with values compounds'], ['else', %w'with select distinct columns from join where group having compounds order limit lock']])
       Dataset.def_sql_method(self, :update, [['if db.sqlite_version >= 30803', %w'with update table set where'], ["else", %w'update table set where']])
 
@@ -620,6 +630,14 @@ module Sequel
       # supports the following conflict resolution algoriths: ROLLBACK, ABORT,
       # FAIL, IGNORE and REPLACE.
       #
+      # On SQLite 3.24.0+, you can pass a hash to use an ON CONFLICT clause.
+      # With out :update option, uses ON CONFLICT DO NOTHING.  Options:
+      #
+      # :conflict_where :: The index filter, when using a partial index to determine uniqueness.
+      # :target :: The column name or expression to handle uniqueness violations on.
+      # :update :: A hash of columns and values to set.  Uses ON CONFLICT DO UPDATE.
+      # :update_where :: A WHERE condition to use for the update.
+      #
       # Examples:
       #
       #   DB[:table].insert_conflict.insert(a: 1, b: 2)
@@ -627,11 +645,39 @@ module Sequel
       #
       #   DB[:table].insert_conflict(:replace).insert(a: 1, b: 2)
       #   # INSERT OR REPLACE INTO TABLE (a, b) VALUES (1, 2)
-      def insert_conflict(resolution = :ignore)
-        unless INSERT_CONFLICT_RESOLUTIONS.include?(resolution.to_s.upcase)
-          raise Error, "Invalid value passed to Dataset#insert_conflict: #{resolution.inspect}.  The allowed values are: :rollback, :abort, :fail, :ignore, or :replace"
+      #
+      #   DB[:table].insert_conflict({}).insert(a: 1, b: 2)
+      #   # INSERT INTO TABLE (a, b) VALUES (1, 2)
+      #   # ON CONFLICT DO NOTHING
+      #   
+      #   DB[:table].insert_conflict(target: :a).insert(a: 1, b: 2)
+      #   # INSERT INTO TABLE (a, b) VALUES (1, 2)
+      #   # ON CONFLICT (a) DO NOTHING
+      #
+      #   DB[:table].insert_conflict(target: :a, conflict_where: {c: true}).insert(a: 1, b: 2)
+      #   # INSERT INTO TABLE (a, b) VALUES (1, 2)
+      #   # ON CONFLICT (a) WHERE (c IS TRUE) DO NOTHING
+      #   
+      #   DB[:table].insert_conflict(target: :a, update: {b: Sequel[:excluded][:b]}).insert(a: 1, b: 2)
+      #   # INSERT INTO TABLE (a, b) VALUES (1, 2)
+      #   # ON CONFLICT (a) DO UPDATE SET b = excluded.b
+      #   
+      #   DB[:table].insert_conflict(target: :a,
+      #     update: {b: Sequel[:excluded][:b]}, update_where: {Sequel[:table][:status_id] => 1}).insert(a: 1, b: 2)
+      #   # INSERT INTO TABLE (a, b) VALUES (1, 2)
+      #   # ON CONFLICT (a) DO UPDATE SET b = excluded.b WHERE (table.status_id = 1)
+      def insert_conflict(opts = :ignore)
+        case opts
+        when Symbol, String
+          unless INSERT_CONFLICT_RESOLUTIONS.include?(opts.to_s.upcase)
+            raise Error, "Invalid symbol or string passed to Dataset#insert_conflict: #{opts.inspect}.  The allowed values are: :rollback, :abort, :fail, :ignore, or :replace"
+          end
+          clone(:insert_conflict => opts)
+        when Hash
+          clone(:insert_on_conflict => opts)
+        else
+          raise Error, "Invalid value passed to Dataset#insert_conflict: #{opts.inspect}, should use a symbol or a hash"
         end
-        clone(:insert_conflict => resolution)
       end
 
       # Ignore uniqueness/exclusion violations when inserting, using INSERT OR IGNORE.
@@ -685,6 +731,14 @@ module Sequel
         false
       end
       
+      # SQLite 3.25+ supports window functions.  However, support is only enabled
+      # on SQLite 3.26.0+ because internal Sequel usage of window functions
+      # to implement eager loading of limited associations triggers
+      # an SQLite crash bug in versions 3.25.0-3.25.3.
+      def supports_window_functions?
+        db.sqlite_version >= 32600
+      end
+    
       private
       
       # SQLite uses string literals instead of identifiers in AS clauses.
@@ -729,6 +783,36 @@ module Sequel
         end
       end
 
+      # Add ON CONFLICT clause if it should be used
+      def insert_on_conflict_sql(sql)
+        if opts = @opts[:insert_on_conflict]
+          sql << " ON CONFLICT"
+
+          if target = opts[:constraint] 
+            sql << " ON CONSTRAINT "
+            identifier_append(sql, target)
+          elsif target = opts[:target]
+            sql << ' '
+            identifier_append(sql, Array(target))
+            if conflict_where = opts[:conflict_where]
+              sql << " WHERE "
+              literal_append(sql, conflict_where)
+            end
+          end
+
+          if values = opts[:update]
+            sql << " DO UPDATE SET "
+            update_sql_values_hash(sql, values)
+            if update_where = opts[:update_where]
+              sql << " WHERE "
+              literal_append(sql, update_where)
+            end
+          else
+            sql << " DO NOTHING"
+          end
+        end
+      end
+
       # SQLite uses a preceding X for hex escaping strings
       def literal_blob_append(sql, v)
         sql <<  "X'" << v.unpack("H*").first << "'"
@@ -757,6 +841,11 @@ module Sequel
         else
           super
         end
+      end
+
+      # SQLite does not natively support NULLS FIRST/LAST.
+      def requires_emulating_nulls_first?
+        true
       end
 
       # SQLite does not support FOR UPDATE, but silently ignore it

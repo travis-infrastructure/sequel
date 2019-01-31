@@ -28,8 +28,8 @@ class Sequel::ShardedThreadedConnectionPool < Sequel::ThreadedConnectionPool
     add_servers(opts[:servers].keys) if opts[:servers]
   end
   
-  # Adds new servers to the connection pool.  Allows for dynamic expansion of the potential slaves/shards
-  # at runtime. servers argument should be an array of symbols. 
+  # Adds new servers to the connection pool.  Allows for dynamic expansion of the potential replicas/shards
+  # at runtime. +servers+ argument should be an array of symbols. 
   def add_servers(servers)
     sync do
       servers.each do |server|
@@ -46,6 +46,7 @@ class Sequel::ShardedThreadedConnectionPool < Sequel::ThreadedConnectionPool
   # A hash of connections currently being used for the given server, key is the
   # Thread, value is the connection.  Nonexistent servers will return nil.  Treat
   # this as read only, do not modify the resulting object.
+  # The calling code should already have the mutex before calling this.
   def allocated(server=:default)
     @allocated[server]
   end
@@ -70,13 +71,14 @@ class Sequel::ShardedThreadedConnectionPool < Sequel::ThreadedConnectionPool
   # An array of connections opened but not currently used, for the given
   # server. Nonexistent servers will return nil. Treat this as read only, do
   # not modify the resulting object.
+  # The calling code should already have the mutex before calling this.
   def available_connections(server=:default)
     @available_connections[server]
   end
   
   # The total number of connections opened for the given server.
   # Nonexistent servers will return the created count of the default server.
-  # The calling code should not have the mutex before calling this.
+  # The calling code should NOT have the mutex before calling this.
   def size(server=:default)
     @mutex.synchronize{_size(server)}
   end
@@ -221,10 +223,11 @@ class Sequel::ShardedThreadedConnectionPool < Sequel::ThreadedConnectionPool
   # Assign a connection to the thread, or return nil if one cannot be assigned.
   # The caller should NOT have the mutex before calling this.
   def assign_connection(thread, server)
-    alloc = allocated(server)
+    alloc = nil
 
     do_make_new = false
     sync do
+      alloc = allocated(server)
       if conn = next_available(server)
         alloc[thread] = conn
         return conn
@@ -286,7 +289,7 @@ class Sequel::ShardedThreadedConnectionPool < Sequel::ThreadedConnectionPool
   end
 
   # Disconnect all available connections immediately, and schedule currently allocated connections for disconnection
-  # as soon as they are returned to the pool. The calling code should not
+  # as soon as they are returned to the pool. The calling code should NOT
   # have the mutex before calling this.
   def disconnect_connections(conns)
     conns.each{|conn| disconnect_connection(conn)}

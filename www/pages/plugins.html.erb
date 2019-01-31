@@ -12,6 +12,7 @@
 <li><a href="rdoc-plugins/classes/Sequel/Plugins/DatasetAssociations.html">dataset_associations</a>: Adds association methods to datasets that return datasets of associated objects.</li>
 <li><a href="rdoc-plugins/classes/Sequel/Plugins/DelayAddAssociation.html">delay_add_association</a>: Delay add_<i>association</i> calls on new objects until after after the object is saved.</li>
 <li><a href="rdoc-plugins/classes/Sequel/Plugins/EagerEach.html">eager_each</a>: Makes each on an eagerly loaded dataset do eager loading.</li>
+<li><a href="rdoc-plugins/classes/Sequel/Plugins/EagerGraphEager.html">eager_graph_eager</a>: Allows chaining eager loads to associations loaded by eager_graph.</li>
 <li><a href="rdoc-plugins/classes/Sequel/Plugins/ManyThroughMany.html">many_through_many</a>: Allows you to create an association through multiple join tables.</li>
 <li><a href="rdoc-plugins/classes/Sequel/Plugins/NestedAttributes.html">nested_attributes</a>: Allows you to modified associated objects directly through a model object, similar to ActiveRecord's Nested Attributes.</li>
 <li><a href="rdoc-plugins/classes/Sequel/Plugins/PgArrayAssociations.html">pg_array_associations</a>: Adds associations types to handle the case where foreign keys are stored in a PostgreSQL array in one of the tables.</li>
@@ -119,6 +120,7 @@
 <li><a href='https://github.com/adam12/sequel-hash_id'>sequel-hash_id</a>: Obscure your primary keys with a hashid.</li>
 <li><a href='http://github.com/gucki/sequel_mappable'>sequel_mappable</a>: Provides geocoding functionality to model and dataset.</li>
 <li><a href='http://github.com/pkondzior/sequel_nested_set'>sequel_nested_set</a>: Nested set implementation, ported from the Awesome Nested Set Active Record plugin.</li>
+<li><a href='https://github.com/dashingrocket/sequel-nonsequential_id'>sequel-nonsequential_id</a>: Automatically generate non-sequential (pseudo-random) IDs for Sequel Models.</li>
 <li><a href='http://github.com/boof/sequel_notnaughty'>sequel_notnaughty</a>: Port of the NotNaughty validation framework.</li>
 <li><a href='http://github.com/gucki/sequel_paperclip'>sequel_paperclip</a>: Provides attachment functionality for models, including post processing (thumbnail generation, etc).</li>
 <li><a href='https://github.com/yuryroot/sequel-pg_advisory_lock'>sequel-pg_advisory_lock</a>: Allows you to use PostgreSQL advisory locks for application-level mutexes.</li>
@@ -144,8 +146,10 @@
 
 <ul>
 <li><a href="rdoc-plugins/files/lib/sequel/extensions/arbitrary_servers_rb.html">arbitrary_servers</a>: Adds ability to connection to arbitrary servers (instead of just preconfigured ones) in the sharding support.</li>
+<li><a href="rdoc-plugins/files/lib/sequel/extensions/caller_logging_rb.html">caller_logging</a>: Include caller information when logging queries.</li>
 <li><a href="rdoc-plugins/files/lib/sequel/extensions/connection_expiration_rb.html">connection_expiration</a>: Automatically removes connections from the pool after they have been open longer than a timeout.</li>
 <li><a href="rdoc-plugins/files/lib/sequel/extensions/connection_validator_rb.html">connection_validator</a>: Automatically validates connections on pool checkout and handles disconnections transparently.</li>
+<li><a href="rdoc-plugins/files/lib/sequel/extensions/constant_sql_override_rb.html">constant_sql_override</a>: Override generated SQL for Sequel constants with configurable strings.</li>
 <li><a href="rdoc-plugins/files/lib/sequel/extensions/constraint_validations_rb.html">constraint_validations</a>: Creates database constraints when creating/altering tables, with metadata for <a href="rdoc-plugins/classes/Sequel/Plugins/ConstraintValidations.html">automatic model validations via the constraint_validations plugin</a>.</li>
 <li><a href="rdoc-plugins/files/lib/sequel/extensions/error_sql_rb.html">error_sql</a>: Makes DatabaseError#sql return the SQL query that caused the underlying exception.</li>
 <li><a href="rdoc-plugins/files/lib/sequel/extensions/identifier_mangling_rb.html">identifier_mangling</a>: Support modification for the default identifier mangling for the database.</li>

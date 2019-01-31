@@ -1688,6 +1688,40 @@ BasicRegularAndCompositeKeyAssociations = shared_description do
     a.first.albums.must_equal [@album]
     a.first.albums.first.artist.must_equal @artist
   end
+
+  it "should be able to eager_graph dependent eager associations using eager callback" do
+    @album.update(:artist => @artist)
+    @album.add_tag(@tag)
+    
+    a = Artist.eager(:albums=>proc{|ds| ds.eager_graph(:tags, :alias_tags).unordered}).eager(:first_album).all
+    a.must_equal [@artist]
+    a.first.albums.must_equal [@album]
+    a.first.first_album.must_equal @album
+    a.first.albums.first.tags.must_equal [@tag]
+    a.first.albums.first.alias_tags.must_equal [@tag]
+    
+    a = Tag.eager(:albums=>proc{|ds| ds.eager_graph(:artist).unordered}).all
+    a.must_equal [@tag]
+    a.first.albums.must_equal [@album]
+    a.first.albums.first.artist.must_equal @artist
+  end
+
+  it "should be able to eager dependent eager_graph associations using eager_graph_eager" do
+    @album.update(:artist => @artist)
+    @album.add_tag(@tag)
+    
+    a = Artist.eager_graph(:albums, :first_album).eager_graph_eager([:albums], :tags, :alias_tags).all
+    a.must_equal [@artist]
+    a.first.albums.must_equal [@album]
+    a.first.first_album.must_equal @album
+    a.first.albums.first.tags.must_equal [@tag]
+    a.first.albums.first.alias_tags.must_equal [@tag]
+    
+    a = Tag.eager_graph(:albums).eager_graph_eager([:albums], :artist).all
+    a.must_equal [@tag]
+    a.first.albums.must_equal [@album]
+    a.first.albums.first.artist.must_equal @artist
+  end
 end
 
 RegularAndCompositeKeyAssociations = shared_description do
@@ -1766,7 +1800,17 @@ RegularAndCompositeKeyAssociations = shared_description do
     a.first.artist.must_equal @artist
     a.first.artist.tags.must_equal [@tag]
     
+    a = Album.eager(:artist=>proc{|ds| ds.eager_graph(:tags)}).all
+    a.must_equal [@album]
+    a.first.artist.must_equal @artist
+    a.first.artist.tags.must_equal [@tag]
+    
     a = Album.eager_graph(:artist=>:tags).all
+    a.must_equal [@album]
+    a.first.artist.must_equal @artist
+    a.first.artist.tags.must_equal [@tag]
+
+    a = Album.eager_graph(:artist).eager_graph_eager([:artist], :tags).all
     a.must_equal [@album]
     a.first.artist.must_equal @artist
     a.first.artist.tags.must_equal [@tag]
@@ -1795,7 +1839,17 @@ RegularAndCompositeKeyAssociations = shared_description do
     a.first.artist.must_equal @artist
     a.first.artist.first_tag.must_equal @tag
     
+    a = Album.eager(:artist=>proc{|ds| ds.eager_graph(:first_tag)}).all
+    a.must_equal [@album]
+    a.first.artist.must_equal @artist
+    a.first.artist.first_tag.must_equal @tag
+    
     a = Album.eager_graph(:artist=>:first_tag).all
+    a.must_equal [@album]
+    a.first.artist.must_equal @artist
+    a.first.artist.first_tag.must_equal @tag
+    
+    a = Album.eager_graph(:artist).eager_graph_eager([:artist], :first_tag).all
     a.must_equal [@album]
     a.first.artist.must_equal @artist
     a.first.artist.first_tag.must_equal @tag
@@ -1828,6 +1882,7 @@ describe "Sequel::Model Simple Associations" do
     [:albums_tags, :tags, :albums, :artists].each{|t| @db[t].delete}
     class ::Artist < Sequel::Model(@db)
       plugin :dataset_associations
+      plugin :eager_graph_eager
       one_to_many :albums, :order=>:name
       one_to_one :first_album, :clone=>:albums
       one_to_one :second_album, :clone=>:albums, :limit=>[nil, 1]
@@ -1852,6 +1907,7 @@ describe "Sequel::Model Simple Associations" do
     end
     class ::Album < Sequel::Model(@db)
       plugin :dataset_associations
+      plugin :eager_graph_eager
       many_to_one :artist, :reciprocal=>nil
       many_to_one :a_artist, :clone=>:artist, :conditions=>{:name=>'Ar'}, :key=>:artist_id
       many_to_many :tags, :right_key=>:tag_id
@@ -1872,6 +1928,7 @@ describe "Sequel::Model Simple Associations" do
     end
     class ::Tag < Sequel::Model(@db)
       plugin :dataset_associations
+      plugin :eager_graph_eager
       many_to_many :albums
       plugin :many_through_many
       many_through_many :tags, [[:albums_tags, :tag_id, :album_id], [:albums, :id, :artist_id], [:albums, :artist_id, :id], [:albums_tags, :album_id, :tag_id]], :class=>:Tag
@@ -2069,6 +2126,12 @@ describe "Sequel::Model Simple Associations" do
     a.must_equal [@album, album2]
     a.map(&:artist).must_equal [@artist, @artist]
     a.map(&:artist).map(&:albums).must_equal [[@album, album2], [@album, album2]]
+
+    a = Album.eager_graph(:artist=>:albums).eager_graph_eager([:artist], :tags).order{[albums[:id], albums_0[:id]]}.all
+    a.must_equal [@album, album2]
+    a.map(&:artist).must_equal [@artist, @artist]
+    a.map(&:artist).map(&:albums).must_equal [[@album, album2], [@album, album2]]
+    a.map(&:artist).map{|a| a.associations[:tags]}.must_equal [[], []]
   end
 
   it "should have remove method raise an error for one_to_many records if the object isn't already associated" do
@@ -2129,6 +2192,7 @@ describe "Sequel::Model Composite Key Associations" do
     [:albums_tags, :tags, :albums, :artists].each{|t| @db[t].delete}
     class ::Artist < Sequel::Model(@db)
       plugin :dataset_associations
+      plugin :eager_graph_eager
       set_primary_key [:id1, :id2]
       unrestrict_primary_key
       one_to_many :albums, :key=>[:artist_id1, :artist_id2], :order=>:name
@@ -2155,6 +2219,7 @@ describe "Sequel::Model Composite Key Associations" do
     end
     class ::Album < Sequel::Model(@db)
       plugin :dataset_associations
+      plugin :eager_graph_eager
       set_primary_key [:id1, :id2]
       unrestrict_primary_key
       many_to_one :artist, :key=>[:artist_id1, :artist_id2], :reciprocal=>nil
@@ -2177,6 +2242,7 @@ describe "Sequel::Model Composite Key Associations" do
     end
     class ::Tag < Sequel::Model(@db)
       plugin :dataset_associations
+      plugin :eager_graph_eager
       set_primary_key [:id1, :id2]
       unrestrict_primary_key
       many_to_many :albums, :right_key=>[:album_id1, :album_id2], :left_key=>[:tag_id1, :tag_id2]
@@ -2286,6 +2352,7 @@ describe "Sequel::Model pg_array_to_many" do
     [:tags, :albums, :artists].each{|t| @db[t].delete}
     class ::Artist < Sequel::Model(@db)
       plugin :dataset_associations
+      plugin :eager_graph_eager
       one_to_many :albums, :order=>:name
       one_to_one :first_album, :clone=>:albums
       one_to_many :a_albums, :clone=>:albums do |ds| ds.where(:name=>'Al') end
@@ -2294,6 +2361,7 @@ describe "Sequel::Model pg_array_to_many" do
     class ::Album < Sequel::Model(@db)
       plugin :dataset_associations
       plugin :pg_array_associations
+      plugin :eager_graph_eager
       many_to_one :artist, :reciprocal=>nil
       many_to_one :a_artist, :clone=>:artist, :key=>:artist_id do |ds| ds.where(:name=>'Ar') end
       pg_array_to_many :tags, :key=>:tag_ids, :save_after_modify=>true
@@ -2308,6 +2376,7 @@ describe "Sequel::Model pg_array_to_many" do
     class ::Tag < Sequel::Model(@db)
       plugin :dataset_associations
       plugin :pg_array_associations
+      plugin :eager_graph_eager
       many_to_pg_array :albums
     end
     @album = Album.create(:name=>'Al')
@@ -2367,6 +2436,7 @@ describe "Sequel::Model many_to_pg_array" do
     [:tags, :albums, :artists].each{|t| @db[t].delete}
     class ::Artist < Sequel::Model(@db)
       plugin :dataset_associations
+      plugin :eager_graph_eager
       one_to_many :albums, :order=>:name
       one_to_one :first_album, :class=>:Album, :order=>:name
       one_to_many :a_albums, :clone=>:albums do |ds| ds.where(:name=>'Al') end
@@ -2375,6 +2445,7 @@ describe "Sequel::Model many_to_pg_array" do
     class ::Album < Sequel::Model(@db)
       plugin :dataset_associations
       plugin :pg_array_associations
+      plugin :eager_graph_eager
       many_to_one :artist, :reciprocal=>nil
       many_to_one :a_artist, :clone=>:artist, :key=>:artist_id do |ds| ds.where(:name=>'Ar') end
       many_to_pg_array :tags
@@ -2389,6 +2460,7 @@ describe "Sequel::Model many_to_pg_array" do
     class ::Tag < Sequel::Model(@db)
       plugin :dataset_associations
       plugin :pg_array_associations
+      plugin :eager_graph_eager
       pg_array_to_many :albums, :save_after_modify=>true
     end
     @album = Album.create(:name=>'Al')

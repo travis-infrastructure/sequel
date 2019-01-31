@@ -11,10 +11,11 @@ class Sequel::ThreadedConnectionPool < Sequel::ConnectionPool
   attr_reader :max_size
   
   # An array of connections that are available for use by the pool.
+  # The calling code should already have the mutex before calling this.
   attr_reader :available_connections
   
-  # A hash with thread keys and connection values for currently allocated
-  # connections.
+  # A hash with thread keys and connection values for currently allocated connections.
+  # The calling code should already have the mutex before calling this.
   attr_reader :allocated
 
   # The following additional options are respected:
@@ -171,6 +172,8 @@ class Sequel::ThreadedConnectionPool < Sequel::ConnectionPool
   # Assign a connection to the thread, or return nil if one cannot be assigned.
   # The caller should NOT have the mutex before calling this.
   def assign_connection(thread)
+    # Thread safe as instance variable is only assigned to local variable
+    # and not operated on outside mutex.
     allocated = @allocated
     do_make_new = false
     to_disconnect = nil
@@ -183,7 +186,7 @@ class Sequel::ThreadedConnectionPool < Sequel::ConnectionPool
       if (n = _size) >= (max = @max_size)
         allocated.keys.each do |t|
           unless t.alive?
-            (to_disconnect ||= []) << @allocated.delete(t)
+            (to_disconnect ||= []) << allocated.delete(t)
           end
         end
         n = nil

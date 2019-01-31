@@ -82,6 +82,8 @@ module Sequel
       # columns are deleted.  This method should generally not be called
       # directly by user code.
       def clone(opts = (return self; nil))
+        # return self used above because clone is called by almost all
+        # other query methods, and it is the fastest approach
         c = super(:freeze=>false)
         c.opts.merge!(opts)
         unless opts.each_key{|o| break if COLUMN_CHANGE_OPTS.include?(o)}
@@ -289,7 +291,7 @@ module Sequel
         c
       end
 
-      cache ? cached_dataset(:_from_self_ds, &pr) : pr.call
+      opts.empty? ? cached_dataset(:_from_self_ds, &pr) : pr.call
     end
 
     # Match any of the columns to any of the patterns. The terms can be
@@ -1044,6 +1046,16 @@ module Sequel
       add_filter(:where, cond, &block)
     end
     
+    # Return a clone of the dataset with an addition named window that can be
+    # referenced in window functions. See Sequel::SQL::Window for a list of
+    # options that can be passed in. Example:
+    #
+    #   DB[:items].window(:w, :partition=>:c1, :order=>:c2)
+    #   # SELECT * FROM items WINDOW w AS (PARTITION BY c1 ORDER BY c2)
+    def window(name, opts)
+      clone(:window=>((@opts[:window]||EMPTY_ARRAY) + [[name, SQL::Window.new(opts)].freeze]).freeze)
+    end
+
     # Add a common table expression (CTE) with the given name and a dataset that defines the CTE.
     # A common table expression acts as an inline view for the query.
     # Options:

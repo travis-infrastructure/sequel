@@ -1,10 +1,6 @@
 # frozen-string-literal: true
 
-begin
-  require "mysqlplus"
-rescue LoadError
-  require 'mysql'
-end
+require 'mysql'
 raise(LoadError, "require 'mysql' did not define Mysql::CLIENT_MULTI_RESULTS!\n  You are probably using the pure ruby mysql.rb driver,\n  which Sequel does not support. You need to install\n  the C based adapter, and make sure that the mysql.so\n  file is loaded instead of the mysql.rb file.\n") unless defined?(Mysql::CLIENT_MULTI_RESULTS)
 
 require_relative 'utils/mysql_mysql2'
@@ -21,7 +17,7 @@ module Sequel
     # Hash with integer keys and callable values for converting MySQL types.
     MYSQL_TYPES = {}
     {
-      [0, 246] => ::BigDecimal.method(:new),
+      [0, 246] => ::Kernel.method(:BigDecimal),
       [2, 3, 8, 9, 13, 247, 248] => tt.method(:integer),
       [4, 5] => tt.method(:float),
       [249, 250, 251, 252] => ::Sequel::SQL::Blob.method(:new)

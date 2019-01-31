@@ -30,6 +30,12 @@ module Sequel
     #
     #   Model.skip_auto_validations(:all)
     #
+    # It is possible to skip auto validations on a per-model-instance basis via:
+    #
+    #   instance.skip_auto_validations(:unique, :not_null) do
+    #     puts instance.valid?
+    #   end
+    #
     # By default, the plugin uses a not_null validation for NOT NULL columns, but that
     # can be changed to a presence validation using an option:
     #
@@ -58,6 +64,7 @@ module Sequel
       MAX_LENGTH_OPTIONS = {:from=>:values, :allow_nil=>true}.freeze
       SCHEMA_TYPES_OPTIONS = NOT_NULL_OPTIONS
       UNIQUE_OPTIONS = NOT_NULL_OPTIONS
+      EMPTY_ARRAY = [].freeze
 
       def self.apply(model, opts=OPTS)
         model.instance_exec do
@@ -172,38 +179,50 @@ module Sequel
       end
 
       module InstanceMethods
+        # Skip the given types of auto validations on this instance inside the block.
+        def skip_auto_validations(*types)
+          types << :all if types.empty?
+          @_skip_auto_validations = types
+          yield
+        ensure
+          @_skip_auto_validations = nil
+        end
+
         # Validate the model's auto validations columns
         def validate
           super
+          skip = @_skip_auto_validations || EMPTY_ARRAY
+          return if skip.include?(:all)
           opts = model.auto_validate_options
 
-          unless (not_null_columns = model.auto_validate_not_null_columns).empty?
-            if model.auto_validate_presence?
-              validates_presence(not_null_columns, opts[:not_null])
-            else
-              validates_not_null(not_null_columns, opts[:not_null])
+
+          unless skip.include?(:not_null)
+            not_null_method = model.auto_validate_presence? ? :validates_presence : :validates_not_null
+            unless (not_null_columns = model.auto_validate_not_null_columns).empty?
+              public_send(not_null_method, not_null_columns, opts[:not_null])
+            end
+            unless (not_null_columns = model.auto_validate_explicit_not_null_columns).empty?
+              public_send(not_null_method, not_null_columns, opts[:explicit_not_null])
             end
           end
-          unless (not_null_columns = model.auto_validate_explicit_not_null_columns).empty?
-            if model.auto_validate_presence?
-              validates_presence(not_null_columns, opts[:explicit_not_null])
-            else
-              validates_not_null(not_null_columns, opts[:explicit_not_null])
-            end
-          end
-          unless (max_length_columns = model.auto_validate_max_length_columns).empty?
+
+          unless skip.include?(:max_length) || (max_length_columns = model.auto_validate_max_length_columns).empty?
             max_length_columns.each do |col, len|
               validates_max_length(len, col, opts[:max_length])
             end
           end
 
-          validates_schema_types(keys, opts[:schema_types]) if model.auto_validate_types?
-
-          unique_opts = Hash[opts[:unique]]
-          if model.respond_to?(:sti_dataset)
-            unique_opts[:dataset] = model.sti_dataset
+          unless skip.include?(:types) || !model.auto_validate_types?
+            validates_schema_types(keys, opts[:schema_types])
           end
-          model.auto_validate_unique_columns.each{|cols| validates_unique(cols, unique_opts)}
+
+          unless skip.include?(:unique)
+            unique_opts = Hash[opts[:unique]]
+            if model.respond_to?(:sti_dataset)
+              unique_opts[:dataset] = model.sti_dataset
+            end
+            model.auto_validate_unique_columns.each{|cols| validates_unique(cols, unique_opts)}
+          end
         end
       end
     end

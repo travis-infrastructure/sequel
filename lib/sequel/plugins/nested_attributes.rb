@@ -176,6 +176,7 @@ module Sequel
           delay_validate_associated_object(reflection, obj)
           if reflection.returns_array?
             public_send(reflection[:name]) << obj
+            obj.skip_validation_on_next_save!
             after_save_hook{public_send(reflection[:add_method], obj)}
           else
             associations[reflection[:name]] = obj
@@ -190,7 +191,10 @@ module Sequel
             if reflection[:type] == :many_to_one 
               before_save_hook{public_send(reflection[:setter_method], obj.save(:validate=>false))}
             else
-              after_save_hook{public_send(reflection[:setter_method], obj)}
+              after_save_hook do
+                obj.skip_validation_on_next_save!
+                public_send(reflection[:setter_method], obj)
+              end
             end
           end
           add_reciprocal_object(reflection, obj)

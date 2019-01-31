@@ -492,6 +492,64 @@ describe "NestedAttributes plugin" do
     @db.sqls.must_equal ["UPDATE artists SET name = 'Ar' WHERE (id = 10)"]
   end
 
+  it "should not attempt to validate nested attributes twice for one_to_many associations when creating them" do
+    @Artist.nested_attributes :albums
+    validated = []
+    @Album.class_eval do
+      define_method(:validate) do
+        super()
+        validated << self
+      end
+    end
+    a = @Artist.new(:name=>'Ar', :albums_attributes=>[{:name=>'Al'}])
+    @db.sqls.must_equal []
+    validated.length.must_equal 0
+    a.save
+    validated.length.must_equal 1
+    check_sql_array("INSERT INTO artists (name) VALUES ('Ar')",
+      ["INSERT INTO albums (artist_id, name) VALUES (1, 'Al')", "INSERT INTO albums (name, artist_id) VALUES ('Al', 1)"])
+  end
+  
+  it "should not attempt to validate nested attributes twice for one_to_one associations when creating them" do
+    @Artist.nested_attributes :first_album
+    validated = []
+    @Album.class_eval do
+      define_method(:validate) do
+        super()
+        validated << self
+      end
+    end
+    a = @Artist.new(:name=>'Ar', :first_album_attributes=>{:name=>'Al'})
+    @db.sqls.must_equal []
+    validated.length.must_equal 0
+    a.save
+    validated.length.must_equal 1
+    check_sql_array("INSERT INTO artists (name) VALUES ('Ar')",
+      "UPDATE albums SET artist_id = NULL WHERE (artist_id = 1)",
+      "INSERT INTO albums (name, artist_id) VALUES ('Al', 1)")
+  end
+  
+  it "should not clear reciprocal association before saving new one_to_one associated object" do
+    @Artist.one_to_one :first_album, :clone=>:first_album, :reciprocal=>:artist
+    @Artist.nested_attributes :first_album
+    assoc = []
+    @Album.class_eval do
+      define_method(:after_save) do
+        super()
+        assoc << associations[:artist]
+      end
+    end
+    a = @Artist.new(:name=>'Ar', :first_album_attributes=>{:name=>'Al'})
+    @db.sqls.must_equal []
+    assoc.must_be_empty
+    a.save
+    assoc.length.must_equal 1
+    assoc.first.must_be_kind_of(@Artist)
+    check_sql_array("INSERT INTO artists (name) VALUES ('Ar')",
+      "UPDATE albums SET artist_id = NULL WHERE (artist_id = 1)",
+      "INSERT INTO albums (name, artist_id) VALUES ('Al', 1)")
+  end
+  
   it "should not save if nested attribute is not valid and should include nested attribute validation errors in the main object's validation errors" do
     @Artist.class_eval do
       def validate

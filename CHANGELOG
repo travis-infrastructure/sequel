@@ -1,5 +1,151 @@
 === master
 
+* Support skip_auto_validations instance method in auto_validations plugin (oldgreen, jeremyevans) (#1592)
+
+* Support :preconnect_extensions Database option for loading extensions before :preconnect option (jeremyevans)
+
+* Avoid usage of Proc.new with implicit block as ruby 2.7+ deprecates this behavior (jeremyevans)
+
+* Allow Sequel[].as to be used for constructing aliases with eager_graph (e.g. Model.eager_graph(Sequel[:a].as(:b))) (jeremyevans) (#1588)
+
+=== 5.16.0 (2019-01-02)
+
+* Convert integer columns to bigint columns when copying SQLite databases to other databases using bin/sequel -C (jeremyevans) (#1584)
+
+* Use nicer error messages for missing or empty migration directories (Lavode) (#1585)
+
+* Make alter table emulation work correctly in SQLite 3.26.0+ (jeremyevans) (#1582)
+
+* Do not unset new one_to_one associated objects' reciprocal associations before saving associated objects in the nested_attributes plugin (jeremyevans)
+
+* Do not validate new one_to_one associated objects twice when saving in the nested_attributes plugin (jeremyevans)
+
+* Fix :qualify_tables option to class_table_inheritance plugin to work correctly with subclasses of subclasses (benalavi) (#1581)
+
+* Make class_table_inheritance plugin use the schema cache instead of sending a query to get columns for tables (kenaniah) (#1580)
+
+* Remove loading of mysqlplus in the mysql adapter (jeremyevans)
+
+* Make mysql adapter work correctly on ruby 2.6+ (jeremyevans)
+
+* Add Database#rollback_on_exit to rollback transactions instead of committing them when exiting the transaction block (jeremyevans)
+
+* Enable window functions in SQLite 3.26.0+ (jeremyevans)
+
+* Do not override existing methods when creating Sequel::Model attribute getter/setter methods (jeremyevans) (#1578)
+
+* Use parentheses for expressions being subscripted (e.g. (array_agg(column))[1]) (jeremyevans)
+
+=== 5.15.0 (2018-12-01)
+
+* Add :conn_str option in the postgres adapter for PostgreSQL connection strings, if the pg driver is used (graywolf) (#1572)
+
+* Add :qualify_tables option to class_table_inheritance plugin to automatically qualify subclass tables with superclass qualifier (benalavi) (#1571)
+
+* Access already allocated connections in a thread safe manner when checking out connections in the sharded threaded connection pool (jeremyevans)
+
+* Automatically support datasets using qualified tables in the class_table_inheritance plugin without having to use the :alias option (benalavi) (#1565)
+
+* Support rename_column without emulation on SQLite 3.25+ (jeremyevans)
+
+* Do not remove currently cached many_to_one associated objects when changing the related foreign key value from nil to non-nil (jeremyevans)
+
+* Do not validate new *_to_many associated objects twice when saving in the nested_attributes plugin (jeremyevans)
+
+* Add Model#skip_validation_on_next_save! for skipping validation on next save call (jeremyevans)
+
+=== 5.14.0 (2018-11-01)
+
+* Drop defaulting the :port option to 5432 in the postgres adapter, so that setting the :service option in :driver_options works (jeremyevans) (#1558)
+
+* Do not cache values for columns without parseable defaults when using :cache option in defaults_setter plugin (jeremyevans)
+
+* Emulate NULLS FIRST/LAST ordering on databases that do not natively support it (jeremyevans)
+
+* Do not modify boolean expressions created from string or array if string or array is modified (jeremyevans)
+
+* Make roots and roots_dataset dataset methods instead of class methods in the tree plugin (JelF) (#1554)
+
+* Do not cache dataset SQL if dataset uses subquery that cannot cache SQL (jeremyevans)
+
+* Make Model#=== work correctly for models with composite primary keys (jeremyevans)
+
+* Add Model#pk_equal? as a more descriptive name for Model#=== (AlexWayfer) (#1550)
+
+* Do not push down expression inversion in cases where it may result in incorrect behavior (e.g. ANY/SOME/ALL operators) (jeremyevans) (#1549)
+
+=== 5.13.0 (2018-10-01)
+
+* Support :single_value type in prepared statements (rintaun) (#1547)
+
+* Make Model.all in static_cache plugin accept a block (AlexWayfer, jeremyevans) (#1543)
+
+* Add constant_sql_override extension for overriding SQL used for constants such as CURRENT_TIMESTAMP (celsworth) (#1538)
+
+* Do not cache from_self datasets if options are given (jeremyevans)
+
+=== 5.12.0 (2018-08-31)
+
+* Make constraint_validations extension respect Database#constraint_validations_table setting (jeremyevans)
+
+* Make Sequel.extension load files from gems (jeremyevans)
+
+* Map clob prepared statement argument type to OCI8::CLOB in the oracle adapter (pipistrellka) (#1534)
+
+* Make Model.load_cache public in the static_cache plugin (AlexWayfer) (#1533)
+
+* Enable support for NOWAIT on MariaDB 10.3+ (jeremyevans)
+
+* Enable support for INTERSECT and EXCEPT on MariaDB 10.3+ (jeremyevans)
+
+* Make tactical_eager_loading plugin handle automatic eager loading for associated objects created by eager_graph (jeremyevans)
+
+* Cache eager_graph loader to speed up subsequent loads from the same dataset (jeremyevans)
+
+* Add caller_logging database extension to log callers before queries, useful during development (jeremyevans)
+
+* Add Database#call_procedure in the postgres adapter for calling PostgreSQL 11+ procedures (jeremyevans)
+
+* Add eager_graph_eager plugin for chaining eager association loads after eager_graph association loads (jeremyevans)
+
+* Support using Dataset#eager_graph in eager load callback for associations using join tables (jeremyevans)
+
+* Make Dataset#graph handle existing selections without determinable aliases by forcing a subselect (jeremyevans)
+
+* Freeze prepared statement arguments before returning the prepared statement (jeremyevans)
+
+* Refactor emulated prepared statement internals to use a placeholder literalizer (jeremyevans)
+
+=== 5.11.0 (2018-08-01)
+
+* Fix using the jdbc/sqlserver adapter on JRuby 9.2+ (jeremyevans)
+
+* Fix dumping schema for numeric/decimal columns with default values, broken starting in 5.9.0 (jeremyevans)
+
+* Recognize additional check constraint violations on certain versions of SQLite (jeremyevans)
+
+* Use cached model instances for Model.first calls without an argument or with a single integer argument in the static_cache plugin (AlexWayfer) (#1529)
+
+* Support ON CONFLICT clause for INSERT on SQLite 3.24+ (jeremyevans)
+
+* Support Dataset#window for WINDOW clause on MySQL 8 and SQLAnywhere (jeremyevans)
+
+* Enable window function support on SQLAnywhere (jeremyevans)
+
+* Support using a hash as a window function :frame option value, with support for ROWS/RANGE/GROUPS, numeric offsets, and EXCLUDE (jeremyevans)
+
+* Allow using set_column_default with a nil value to remove the default value for a column on MySQL when the column is NOT NULL (jeremyevans)
+
+=== 5.10.0 (2018-07-01)
+
+* Use input type casts when using the postgres adapter with pg 0.18+ to reduce string allocations for some primitive types used as prepared statement arguments (jeremyevans)
+
+* Assume local time if database timezone not specified when handling BC timestamps on JRuby 9.2.0.0 in the pg_extended_date_support extension (jeremyevans)
+
+* Fix parsing of timetz types in the jdbc/postgresql adapter (jeremyevans)
+
+* Make SQLTime.parse respect SQLTime.date and Sequel.application_timezone (jeremyevans)
+
 * Add :top as an option in the list plugin (celsworth) (#1526)
 
 * Fix Model#{ancestors,descendants,self_and_siblings} in the tree plugin when custom parent/children association names are used (jeremyevans) (#1525)
