@@ -104,6 +104,24 @@ describe "PostgreSQL", '#create_table' do
     @db.check_constraints(:tmp_dolls).must_equal(:ic=>{:definition=>"CHECK ((i > 2))", :columns=>[:i]}, :jc=>{:definition=>"CHECK ((j > 2))", :columns=>[:j]}, :ijc=>{:definition=>"CHECK (((i - j) > 2))", :columns=>[:i, :j]})
   end
 
+  it "should have #check_constraints return check constraints where columns are unknown" do
+    begin
+      @db.create_table(:tmp_dolls) do
+        Integer :i
+        Integer :j
+      end
+      @db.run "CREATE OR REPLACE FUNCTION valid_tmp_dolls(t1 tmp_dolls) RETURNS boolean AS 'SELECT false' LANGUAGE SQL;"
+      @db.alter_table(:tmp_dolls) do
+        add_constraint(:valid_tmp_dolls, Sequel.function(:valid_tmp_dolls, :tmp_dolls))
+      end
+
+      @db.check_constraints(:tmp_dolls).must_equal(:valid_tmp_dolls=>{:definition=>"CHECK (valid_tmp_dolls(tmp_dolls.*))", :columns=>[]})
+    ensure
+      @db.run "ALTER TABLE tmp_dolls DROP CONSTRAINT IF EXISTS valid_tmp_dolls"
+      @db.run "DROP FUNCTION IF EXISTS valid_tmp_dolls(tmp_dolls)"
+    end
+  end if DB.server_version >= 90000
+
   it "should not allow to pass both :temp and :unlogged" do
     proc do
       @db.create_table(:temp_unlogged_dolls, :temp => true, :unlogged => true){text :name}
@@ -333,6 +351,26 @@ describe "PostgreSQL", 'INSERT ON CONFLICT' do
     @ds.all.must_equal [{:a=>1, :b=>5, :c=>5, :c_is_unique=>false}]
   end
 end if DB.server_version >= 90500
+
+describe "A PostgreSQL database" do
+  before do
+    @db = DB
+    @db.create_table!(:cte_test){Integer :id}
+  end
+  after do
+    @db.drop_table?(:cte_test)
+  end
+
+  it "should give correct results for WITH AS [NOT] MATERIALIZED" do
+    @ds = @db[:cte_test]
+    @ds.insert(1)
+    @ds.insert(2)
+    
+    @db[:t].with(:t, @ds, :materialized=>nil).order(:id).map(:id).must_equal [1, 2]
+    @db[:t].with(:t, @ds, :materialized=>true).order(:id).map(:id).must_equal [1, 2]
+    @db[:t].with(:t, @ds, :materialized=>false).order(:id).map(:id).must_equal [1, 2]
+  end
+end if DB.server_version >= 120000
 
 describe "A PostgreSQL database" do
   before(:all) do
@@ -2926,6 +2964,8 @@ describe 'PostgreSQL json type' do
     @h = {'a'=>'b', '1'=>[3, 4, 5]}
   end
   after do
+    @db.wrap_json_primitives = nil
+    @db.typecast_json_strings = nil
     @db.drop_table?(:items)
   end
 
@@ -2933,9 +2973,12 @@ describe 'PostgreSQL json type' do
   json_types << :jsonb if DB.server_version >= 90400
   json_types.each do |json_type|
     json_array_type = "#{json_type}[]"
-    pg_json = lambda{|v| Sequel.send(:"pg_#{json_type}", v)}
+    pg_json = Sequel.method(:"pg_#{json_type}")
+    pg_json_wrap = Sequel.method(:"pg_#{json_type}_wrap")
     hash_class = json_type == :jsonb ? Sequel::Postgres::JSONBHash : Sequel::Postgres::JSONHash
     array_class = json_type == :jsonb ? Sequel::Postgres::JSONBArray : Sequel::Postgres::JSONArray
+    str_class = json_type == :jsonb ? Sequel::Postgres::JSONBString : Sequel::Postgres::JSONString
+    object_class = json_type == :jsonb ? Sequel::Postgres::JSONBObject : Sequel::Postgres::JSONObject
 
     it 'insert and retrieve json values' do
       @db.create_table!(:items){column :j, json_type}
@@ -2965,6 +3008,44 @@ describe 'PostgreSQL json type' do
       @ds.all.must_equal rs
     end
 
+    it 'insert and retrieve json primitive values' do
+      @db.create_table!(:items){column :j, json_type}
+      ['str', 1, 2.5, nil, true, false].each do |rv|
+        @ds.delete
+        @ds.insert(pg_json_wrap.call(rv))
+        @ds.count.must_equal 1
+        rs = @ds.all
+        v = rs.first[:j]
+        v.class.must_equal(rv.class)
+        if rv.nil?
+          v.must_be_nil
+        else
+          v.must_equal rv
+        end
+      end
+
+      @db.wrap_json_primitives = true
+      ['str', 1, 2.5, nil, true, false].each do |rv|
+        @ds.delete
+        @ds.insert(pg_json_wrap.call(rv))
+        @ds.count.must_equal 1
+        rs = @ds.all
+        v = rs.first[:j]
+        v.class.ancestors.must_include(object_class)
+        v.__getobj__.must_be_kind_of(rv.class)
+        if rv.nil?
+          v.must_be_nil
+          v.__getobj__.must_be_nil
+        else
+          v.must_equal rv
+          v.__getobj__.must_equal rv
+        end
+        @ds.delete
+        @ds.insert(rs.first)
+        @ds.all[0][:j].must_equal rs[0][:j]
+      end
+    end
+
     it 'insert and retrieve json[] values' do
       @db.create_table!(:items){column :j, json_array_type}
       j = Sequel.pg_array([pg_json.call('a'=>1), pg_json.call(['b', 2])])
@@ -2981,14 +3062,120 @@ describe 'PostgreSQL json type' do
       @ds.all.must_equal rs
     end
 
+    it 'insert and retrieve json[] values with json primitives' do
+      @db.create_table!(:items){column :j, json_array_type}
+      raw = ['str', 1, 2.5, nil, true, false]
+      j = Sequel.pg_array(raw.map(&pg_json_wrap), json_type)
+      @ds.insert(j)
+      @ds.count.must_equal 1
+      rs = @ds.all
+      v = rs.first[:j]
+      v.class.must_equal(Sequel::Postgres::PGArray)
+      v.to_a.must_be_kind_of(Array)
+      v.map(&:class).must_equal raw.map(&:class)
+      v.must_equal raw
+      v.to_a.must_equal raw
+
+      @db.wrap_json_primitives = true
+      j = Sequel.pg_array(raw.map(&pg_json_wrap), json_type)
+      @ds.insert(j)
+      rs = @ds.all
+      v = rs.first[:j]
+      v.class.must_equal(Sequel::Postgres::PGArray)
+      v.to_a.must_be_kind_of(Array)
+      v.map(&:class).each{|c| c.ancestors.must_include(object_class)}
+      [v, v.to_a].each do |v0|
+        v0.zip(raw) do |v1, r1|
+          if r1.nil?
+            v1.must_be_nil
+            v1.__getobj__.must_be_nil
+          else
+            v1.must_equal r1
+            v1.__getobj__.must_equal r1
+          end
+        end
+      end
+      @ds.delete
+      @ds.insert(rs.first)
+      @ds.all[0][:j].zip(rs[0][:j]) do |v1, r1|
+        if v1.__getobj__.nil?
+          v1.must_be_nil
+          v1.__getobj__.must_be_nil
+        else
+          v1.must_equal r1
+          v1.must_equal r1.__getobj__
+          v1.__getobj__.must_equal r1
+          v1.__getobj__.must_equal r1.__getobj__
+        end
+      end
+    end
+
     it 'with models' do
       @db.create_table!(:items) do
         primary_key :id
         column :h, json_type
       end
       c = Class.new(Sequel::Model(@db[:items]))
+      c.create(:h=>@h).h.must_equal @h
+      c.create(:h=>@a).h.must_equal @a
       c.create(:h=>pg_json.call(@h)).h.must_equal @h
       c.create(:h=>pg_json.call(@a)).h.must_equal @a
+    end
+
+    it 'with models with json primitives' do
+      @db.create_table!(:items) do
+        primary_key :id
+        column :h, json_type
+      end
+      c = Class.new(Sequel::Model(@db[:items]))
+
+      ['str', 1, 2.5, nil, true, false].each do |v|
+        @db.wrap_json_primitives = nil
+        cv = c[c.insert(:h=>pg_json_wrap.call(v))]
+        cv.h.class.ancestors.wont_include(object_class)
+        if v.nil?
+          cv.h.must_be_nil
+        else
+          cv.h.must_equal v
+        end
+
+        @db.wrap_json_primitives = true
+        cv.refresh
+        cv.h.class.ancestors.must_include(object_class)
+        cv.save
+        cv.refresh
+        cv.h.class
+
+        if v.nil?
+          cv.h.must_be_nil
+        else
+          cv.h.must_equal v
+        end
+
+        c.new(:h=>cv.h).h.class.ancestors.must_include(object_class)
+      end
+
+      v = c.new(:h=>'{}').h
+      v.class.must_equal hash_class
+      v.must_equal({})
+      @db.typecast_json_strings = true
+      v = c.new(:h=>'{}').h
+      v.class.must_equal str_class
+      v.must_equal '{}'
+
+      c.new(:h=>'str').h.class.ancestors.must_include(object_class)
+      c.new(:h=>'str').h.must_equal 'str'
+      c.new(:h=>1).h.class.ancestors.must_include(object_class)
+      c.new(:h=>1).h.must_equal 1
+      c.new(:h=>2.5).h.class.ancestors.must_include(object_class)
+      c.new(:h=>2.5).h.must_equal 2.5
+      c.new(:h=>true).h.class.ancestors.must_include(object_class)
+      c.new(:h=>true).h.must_equal true
+      c.new(:h=>false).h.class.ancestors.must_include(object_class)
+      c.new(:h=>false).h.must_equal false
+
+      c.new(:h=>nil).h.class.ancestors.wont_include(object_class)
+      c.new(:h=>nil).h.must_be_nil
     end
 
     it 'with empty json default values and defaults_setter plugin' do
@@ -3023,6 +3210,36 @@ describe 'PostgreSQL json type' do
       j = Sequel.pg_array([pg_json.call('a'=>1), pg_json.call(['b', 2])], json_type)
       @ds.call(:insert, {:i=>j}, {:i=>:$i})
       @ds.get(:i).must_equal j
+    end if uses_pg_or_jdbc
+
+    it 'use json primitives in bound variables' do
+      @db.create_table!(:items){column :i, json_type}
+      @db.wrap_json_primitives = true
+      raw = ['str', 1, 2.5, nil, true, false]
+      raw.each do |v|
+        @ds.delete
+        @ds.call(:insert, {:i=>@db.get(pg_json_wrap.call(v))}, {:i=>:$i})
+        rv = @ds.get(:i)
+        rv.class.ancestors.must_include(object_class)
+        if v.nil?
+          rv.must_be_nil
+        else
+          rv.must_equal v
+        end
+      end
+
+      @db.create_table!(:items){column :i, json_array_type}
+      j = Sequel.pg_array(raw.map(&pg_json_wrap), json_type)
+      @ds.call(:insert, {:i=>j}, {:i=>:$i})
+      @ds.all[0][:i].zip(raw) do |v1, r1|
+        if v1.__getobj__.nil?
+          v1.must_be_nil
+          v1.__getobj__.must_be_nil
+        else
+          v1.must_equal r1
+          v1.__getobj__.must_equal r1
+        end
+      end
     end if uses_pg_or_jdbc
 
     it 'operations/functions with pg_json_ops' do
@@ -3383,6 +3600,30 @@ describe 'PostgreSQL range types' do
     @ds.filter(h).call(:first, r2).must_be_nil
     @ds.filter(h).call(:delete, @ra).must_equal 1
   end if uses_pg_or_jdbc
+
+  it 'handle endless ranges' do
+    @db.get(Sequel.cast(eval('1...'), :int4range)).must_be :==, eval('1...')
+    @db.get(Sequel.cast(eval('1...'), :int4range)).wont_be :==, eval('2...')
+    @db.get(Sequel.cast(eval('1...'), :int4range)).wont_be :==, eval('1..')
+    @db.get(Sequel.cast(eval('2...'), :int4range)).must_be :==, eval('2...')
+    @db.get(Sequel.cast(eval('2...'), :int4range)).wont_be :==, eval('2..')
+    @db.get(Sequel.cast(eval('2...'), :int4range)).wont_be :==, eval('1...')
+  end if RUBY_VERSION >= '2.6'
+
+  it 'handle startless ranges' do
+    @db.get(Sequel.cast(eval('...1'), :int4range)).must_be :==, Sequel::Postgres::PGRange.new(nil, 1, :exclude_begin=>true, :exclude_end=>true, :db_type=>"int4range")
+    @db.get(Sequel.cast(eval('...1'), :int4range)).wont_be :==, Sequel::Postgres::PGRange.new(nil, 2, :exclude_begin=>true, :exclude_end=>true, :db_type=>"int4range")
+    @db.get(Sequel.cast(eval('...1'), :int4range)).wont_be :==, Sequel::Postgres::PGRange.new(nil, 1, :exclude_end=>true, :db_type=>"int4range")
+    @db.get(Sequel.cast(eval('...1'), :int4range)).wont_be :==, Sequel::Postgres::PGRange.new(nil, 1, :exclude_begin=>true, :db_type=>"int4range")
+  end if RUBY_VERSION >= '2.7'
+
+  it 'handle startless ranges' do
+    @db.get(Sequel.cast(eval('nil...nil'), :int4range)).must_be :==, Sequel::Postgres::PGRange.new(nil, nil, :exclude_begin=>true, :exclude_end=>true, :db_type=>"int4range")
+    @db.get(Sequel.cast(eval('nil...nil'), :int4range)).wont_be :==, Sequel::Postgres::PGRange.new(nil, nil, :exclude_begin=>true, :db_type=>"int4range")
+    @db.get(Sequel.cast(eval('nil...nil'), :int4range)).wont_be :==, Sequel::Postgres::PGRange.new(nil, nil, :exclude_end=>true, :db_type=>"int4range")
+    @db.get(Sequel.cast(eval('nil...nil'), :int4range)).wont_be :==, Sequel::Postgres::PGRange.new(1, nil, :exclude_begin=>true, :db_type=>"int4range")
+    @db.get(Sequel.cast(eval('nil...nil'), :int4range)).wont_be :==, Sequel::Postgres::PGRange.new(nil, 1, :exclude_begin=>true, :db_type=>"int4range")
+  end if RUBY_VERSION >= '2.7'
 
   it 'parse default values for schema' do
     @db.create_table!(:items) do
@@ -3930,6 +4171,14 @@ describe 'PostgreSQL enum types' do
     @db.schema(:test_enumt, :reload=>true).first.last[:enum_values].must_equal @initial_enum_values
     @db.rename_enum(:new_enum, :test_enum)
   end
+
+  it "should rename enum values" do
+    @db.rename_enum_value(:test_enum, :b, :x)
+    new_enum_values = @initial_enum_values
+    new_enum_values[new_enum_values.index('b')] = 'x'
+    @db.schema(:test_enumt, :reload=>true).first.last[:enum_values].must_equal new_enum_values
+    @db.rename_enum_value(:test_enum, :x, :b)
+  end if DB.server_version >= 100000
 end
 
 describe "PostgreSQL stored procedures for datasets" do
@@ -3980,6 +4229,10 @@ describe "pg_auto_constraint_validations plugin" do
       constraint :valid_i, Sequel[:i] < 10
       constraint(:valid_i_id, Sequel[:i] + Sequel[:id] < 20)
     end
+    @db.run "CREATE OR REPLACE FUNCTION valid_test1(t1 test1) RETURNS boolean AS 'SELECT t1.i != -100' LANGUAGE SQL;"
+    @db.alter_table(:test1) do
+      add_constraint(:valid_test1, Sequel.function(:valid_test1, :test1))
+    end
     @db.create_table!(:test2) do
       Integer :test2_id, :primary_key=>true
       foreign_key :test1_id, :test1
@@ -4000,6 +4253,8 @@ describe "pg_auto_constraint_validations plugin" do
     @c2.insert(:test2_id=>3, :test1_id=>1)
   end
   after(:all) do
+    @db.run "ALTER TABLE test1 DROP CONSTRAINT IF EXISTS valid_test1"
+    @db.run "DROP FUNCTION IF EXISTS valid_test1(test1)"
     @db.drop_table?(:test2, :test1)
   end
 
@@ -4007,6 +4262,14 @@ describe "pg_auto_constraint_validations plugin" do
     o = @c1.new(:id=>5, :i=>12)
     proc{o.save}.must_raise Sequel::ValidationFailed
     o.errors.must_equal(:i=>['is invalid'])
+  end
+
+  it "should handle check constraint failures where the columns are unknown, if columns are explicitly specified" do
+    o = @c1.new(:id=>5, :i=>-100)
+    proc{o.save}.must_raise Sequel::CheckConstraintViolation
+    @c1.pg_auto_constraint_validation_override(:valid_test1, :i, "should not be -100")
+    proc{o.save}.must_raise Sequel::ValidationFailed
+    o.errors.must_equal(:i=>['should not be -100'])
   end
 
   it "should handle check constraint failures as validation errors when updating" do

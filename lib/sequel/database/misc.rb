@@ -106,8 +106,11 @@ module Sequel
     # :log_connection_info :: Whether connection information should be logged when logging queries.
     # :log_warn_duration :: The number of elapsed seconds after which queries should be logged at warn level.
     # :name :: A name to use for the Database object, displayed in PoolTimeout .
-    # :preconnect :: Whether to setup the maximum number of connections during initialization.
-    #                Can use a value of 'concurrently' to preconnect in separate threads.
+    # :preconnect :: Automatically create the maximum number of connections, so that they don't
+    #                need to be created as needed.  This is useful when connecting takes a long time
+    #                and you want to avoid possible latency during runtime.
+    #                Set to :concurrently to create the connections in separate threads. Otherwise
+    #                they'll be created sequentially.
     # :preconnect_extensions :: Similar to the :extensions option, but loads the extensions before the
     #                           connections are made by the :preconnect option.
     # :quote_identifiers :: Whether to quote identifiers.
@@ -115,7 +118,9 @@ module Sequel
     # :single_threaded :: Whether to use a single-threaded connection pool.
     # :sql_log_level :: Method to use to log SQL to a logger, :info by default.
     #
-    # All options given are also passed to the connection pool.
+    # All options given are also passed to the connection pool.  Additional options respected by
+    # the connection pool are :after_connect, :connect_sqls, :max_connections, :pool_timeout,
+    # :servers, and :servers_hash.  See the connection pool documentation for details.
     def initialize(opts = OPTS)
       @opts ||= opts
       @opts = connection_pool_default_options.merge(@opts)
@@ -473,9 +478,7 @@ module Sequel
     
     if RUBY_VERSION >= '2.4'
       # Typecast a string to a BigDecimal
-      def _typecast_value_string_to_decimal(value)
-        BigDecimal(value)
-      end
+      alias _typecast_value_string_to_decimal BigDecimal
     else
       # :nocov:
       def _typecast_value_string_to_decimal(value)
@@ -510,9 +513,7 @@ module Sequel
     end
 
     # Typecast the value to a Float
-    def typecast_value_float(value)
-      Float(value)
-    end
+    alias typecast_value_float Float
 
     # Typecast the value to an Integer
     def typecast_value_integer(value)

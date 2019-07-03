@@ -1679,7 +1679,7 @@ describe "Schema Parser" do
     sch = @db.schema(:x)
     sch.must_equal [[:a, {:db_type=>"x", :ruby_default=>nil}], [:b, {:db_type=>"x", :ruby_default=>nil}]]
     sch[0][1][:db_type].must_be_same_as(sch[1][1][:db_type])
-  end if RUBY_VERSION >= '2.5' && !defined?(JRUBY_VERSION)
+  end if RUBY_VERSION >= '2.5'
 
   it "should set :auto_increment to true by default if unset and a single integer primary key is used" do
     @db.define_singleton_method(:schema_parse_table){|*| [[:a, {:primary_key=>true, :db_type=>'integer'}]]}
@@ -1777,17 +1777,21 @@ describe "Schema Parser" do
     @db.schema(:text).first.last[:type].must_equal :string
     @db.schema(:date).first.last[:type].must_equal :date
     @db.schema(:datetime).first.last[:type].must_equal :datetime
+    @db.schema(:smalldatetime).first.last[:type].must_equal :datetime
     @db.schema(:timestamp).first.last[:type].must_equal :datetime
     @db.schema(:"timestamp with time zone").first.last[:type].must_equal :datetime
     @db.schema(:"timestamp without time zone").first.last[:type].must_equal :datetime
     @db.schema(:time).first.last[:type].must_equal :time
     @db.schema(:"time with time zone").first.last[:type].must_equal :time
     @db.schema(:"time without time zone").first.last[:type].must_equal :time
+    @db.schema(:bool).first.last[:type].must_equal :boolean
     @db.schema(:boolean).first.last[:type].must_equal :boolean
     @db.schema(:real).first.last[:type].must_equal :float
     @db.schema(:float).first.last[:type].must_equal :float
+    @db.schema(:"float unsigned").first.last[:type].must_equal :float
     @db.schema(:double).first.last[:type].must_equal :float
     @db.schema(:"double(1,2)").first.last[:type].must_equal :float
+    @db.schema(:"double(1,2) unsigned").first.last[:type].must_equal :float
     @db.schema(:"double precision").first.last[:type].must_equal :float
     @db.schema(:number).first.last[:type].must_equal :decimal
     @db.schema(:numeric).first.last[:type].must_equal :decimal
@@ -1800,6 +1804,8 @@ describe "Schema Parser" do
     @db.schema(:image).first.last[:type].must_equal :blob
     @db.schema(:nchar).first.last[:type].must_equal :string
     @db.schema(:nvarchar).first.last[:type].must_equal :string
+    @db.schema(:ntext).first.last[:type].must_equal :string
+    @db.schema(:clob).first.last[:type].must_equal :string
     @db.schema(:ntext).first.last[:type].must_equal :string
     @db.schema(:smalldatetime).first.last[:type].must_equal :datetime
     @db.schema(:binary).first.last[:type].must_equal :blob

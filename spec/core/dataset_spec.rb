@@ -3434,6 +3434,16 @@ describe "Dataset#multi_insert" do
       'COMMIT']
   end
   
+  it "should handle :return=>:primary_key option if dataset has a row_proc" do
+    @db.autoid = 1
+    @ds.with_row_proc(lambda{|h| Object.new}).multi_insert(@list, :return=>:primary_key).must_equal [1, 2, 3]
+    @db.sqls.must_equal ['BEGIN',
+      "INSERT INTO items (name) VALUES ('abc')",
+      "INSERT INTO items (name) VALUES ('def')",
+      "INSERT INTO items (name) VALUES ('ghi')",
+      'COMMIT']
+  end
+  
   with_symbol_splitting "should handle splittable symbols for tables" do
     @ds = @ds.from(:sch__tab)
     @ds.multi_insert(@list)
@@ -4481,6 +4491,16 @@ describe "Sequel timezone support" do
   
   it "should raise an error when attempting to typecast to a timestamp from an unsupported type" do
     proc{Sequel.database_to_application_timestamp(Object.new)}.must_raise(Sequel::InvalidValue)
+  end
+
+  it "should raise an InvalidValue error when the Time class is used and when a bad application timezone is used when attempting to convert timestamps" do
+    Sequel.application_timezone = :blah
+    proc{Sequel.database_to_application_timestamp('2009-06-01 10:20:30')}.must_raise(Sequel::InvalidValue)
+  end
+  
+  it "should raise an InvalidValue error when the Time class is used and when a bad database timezone is used when attempting to convert timestamps" do
+    Sequel.database_timezone = :blah
+    proc{Sequel.database_to_application_timestamp('2009-06-01 10:20:30')}.must_raise(Sequel::InvalidValue)
   end
 
   it "should raise an InvalidValue error when the DateTime class is used and when a bad application timezone is used when attempting to convert timestamps" do

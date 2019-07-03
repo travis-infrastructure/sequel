@@ -47,34 +47,40 @@ module Sequel
     #AdVarWChar         = 202
     #AdWChar            = 130
 
-    cp = Object.new
-
-    def cp.bigint(v)
+    bigint = Object.new
+    def bigint.call(v)
       v.to_i
     end
 
-    def cp.numeric(v)
-      BigDecimal(v)
+    numeric = Object.new
+    def numeric.call(v)
+      if v.include?(',')
+        BigDecimal(v.tr(',', '.'))
+      else
+        BigDecimal(v)
+      end
     end
 
-    def cp.binary(v)
+    binary = Object.new
+    def binary.call(v)
       Sequel.blob(v.pack('c*'))
     end
 
-    def cp.date(v)
+    date = Object.new
+    def date.call(v)
       Date.new(v.year, v.month, v.day)
     end
 
     CONVERSION_PROCS = {}
     [
-      [:bigint, AdBigInt],
-      [:numeric, AdNumeric, AdVarNumeric],
-      [:date, AdDBDate],
-      [:binary, AdBinary, AdVarBinary, AdLongVarBinary]
-    ].each do |meth, *types|
-      method = cp.method(meth)
+      [bigint, AdBigInt],
+      [numeric, AdNumeric, AdVarNumeric],
+      [date, AdDBDate],
+      [binary, AdBinary, AdVarBinary, AdLongVarBinary]
+    ].each do |callable, *types|
+      callable.freeze
       types.each do |i|
-        CONVERSION_PROCS[i] = method
+        CONVERSION_PROCS[i] = callable
       end
     end
     CONVERSION_PROCS.freeze
@@ -227,7 +233,6 @@ module Sequel
           cols = []
           conversion_procs = db.conversion_procs
 
-          i = -1
           ts_cp = nil
           recordset.Fields.each do |field|
             type = field.Type
@@ -244,18 +249,21 @@ module Sequel
             else
               conversion_procs[type]
             end
-            cols << [output_identifier(field.Name), cp, i+=1]
+            cols << [output_identifier(field.Name), cp]
           end
 
           self.columns = cols.map(&:first)
           return if recordset.EOF
+          max = cols.length
 
           recordset.GetRows.transpose.each do |field_values|
             h = {}
 
-            cols.each do |name, cp, index|
-              h[name] = if (v = field_values[index]) && cp
-                cp[v]
+            i = -1
+            while (i += 1) < max
+              name, cp = cols[i]
+              h[name] = if (v = field_values[i]) && cp
+                cp.call(v)
               else
                 v
               end

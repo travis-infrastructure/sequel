@@ -1140,13 +1140,84 @@ describe "Database#transaction with savepoint support" do
   end
 
   it "should support after_rollback inside savepoints" do
-    @db.transaction do
+    @db.transaction(:rollback=>:always) do
       @db.after_rollback{@db.execute('foo')}
       @db.transaction(:savepoint=>true){@db.after_rollback{@db.execute('bar')}}
       @db.after_rollback{@db.execute('baz')}
-      raise Sequel::Rollback
     end
     @db.sqls.must_equal ['BEGIN', 'SAVEPOINT autopoint_1', 'RELEASE SAVEPOINT autopoint_1', 'ROLLBACK', 'foo', 'bar', 'baz']
+  end
+
+  it "should run after_commit if savepoint rolled back" do
+    @db.transaction do
+      @db.after_commit{@db.execute('foo')}
+      @db.transaction(:savepoint=>true, :rollback=>:always){@db.after_commit{@db.execute('bar')}}
+    end
+    @db.sqls.must_equal ['BEGIN', 'SAVEPOINT autopoint_1', 'ROLLBACK TO SAVEPOINT autopoint_1', 'COMMIT', 'foo', 'bar']
+  end
+
+  it "should not run after_commit if savepoint rolled back and :savepoint option used" do
+    @db.transaction do
+      @db.after_commit{@db.execute('foo')}
+      @db.transaction(:savepoint=>true, :rollback=>:always){@db.after_commit(:savepoint=>true){@db.execute('bar')}}
+    end
+    @db.sqls.must_equal ['BEGIN', 'SAVEPOINT autopoint_1', 'ROLLBACK TO SAVEPOINT autopoint_1', 'COMMIT', 'foo']
+  end
+
+  it "should not run after_commit if higher-level savepoint rolled back and :savepoint option used" do
+    @db.transaction do
+      @db.after_commit{@db.execute('foo')}
+      @db.transaction(:savepoint=>true, :rollback=>:always){@db.transaction(:savepoint=>true){@db.after_commit(:savepoint=>true){@db.execute('bar')}}}
+    end
+    @db.sqls.must_equal ["BEGIN", "SAVEPOINT autopoint_1", "SAVEPOINT autopoint_2", "RELEASE SAVEPOINT autopoint_2", "ROLLBACK TO SAVEPOINT autopoint_1", "COMMIT", "foo"]
+  end
+
+  it "should not run after_commit if transaction rolled back and :savepoint option used" do
+    @db.transaction(:rollback=>:always) do
+      @db.after_commit{@db.execute('foo')}
+      @db.transaction(:savepoint=>true){@db.transaction(:savepoint=>true){@db.after_commit(:savepoint=>true){@db.execute('bar')}}}
+    end
+    @db.sqls.must_equal ["BEGIN", "SAVEPOINT autopoint_1", "SAVEPOINT autopoint_2", "RELEASE SAVEPOINT autopoint_2", "RELEASE SAVEPOINT autopoint_1", "ROLLBACK"]
+  end
+
+  it "should run after_rollback if savepoint rolls back" do
+    @db.transaction(:rollback=>:always) do
+      @db.after_rollback{@db.execute('foo')}
+      @db.transaction(:savepoint=>true, :rollback=>:always){@db.after_rollback{@db.execute('bar')}}
+      @db.after_rollback{@db.execute('baz')}
+    end
+    @db.sqls.must_equal ['BEGIN', 'SAVEPOINT autopoint_1', 'ROLLBACK TO SAVEPOINT autopoint_1', 'ROLLBACK', 'foo', 'bar', 'baz']
+  end
+
+  it "should run after_rollback when savepoint rolls back if :savepoint option used" do
+    @db.transaction(:rollback=>:always) do
+      @db.after_rollback{@db.execute('foo')}
+      @db.transaction(:savepoint=>true, :rollback=>:always){@db.after_rollback(:savepoint=>true){@db.execute('bar')}}
+      @db.after_rollback{@db.execute('baz')}
+    end
+    @db.sqls.must_equal ['BEGIN', 'SAVEPOINT autopoint_1', 'ROLLBACK TO SAVEPOINT autopoint_1', 'bar', 'ROLLBACK', 'foo', 'baz']
+  end
+
+  it "should run after_rollback if savepoint rolled back and :savepoint option used, even if transaction commits" do
+    @db.transaction do
+      @db.after_commit{@db.execute('foo')}
+      @db.transaction(:savepoint=>true, :rollback=>:always){@db.after_rollback(:savepoint=>true){@db.execute('bar')}}
+    end
+    @db.sqls.must_equal ['BEGIN', 'SAVEPOINT autopoint_1', 'ROLLBACK TO SAVEPOINT autopoint_1', 'bar', 'COMMIT', 'foo']
+  end
+
+  it "should run after_rollback if higher-level savepoint rolled back and :savepoint option used" do
+    @db.transaction do
+      @db.transaction(:savepoint=>true, :rollback=>:always){@db.transaction(:savepoint=>true){@db.after_rollback(:savepoint=>true){@db.execute('bar')}}}
+    end
+    @db.sqls.must_equal ["BEGIN", "SAVEPOINT autopoint_1", "SAVEPOINT autopoint_2", "RELEASE SAVEPOINT autopoint_2", "ROLLBACK TO SAVEPOINT autopoint_1", "bar", "COMMIT"]
+  end
+
+  it "should run after_rollback if transaction rolled back and :savepoint option used" do
+    @db.transaction(:rollback=>:always) do
+      @db.transaction(:savepoint=>true){@db.transaction(:savepoint=>true){@db.after_rollback(:savepoint=>true){@db.execute('bar')}}}
+    end
+    @db.sqls.must_equal ["BEGIN", "SAVEPOINT autopoint_1", "SAVEPOINT autopoint_2", "RELEASE SAVEPOINT autopoint_2", "RELEASE SAVEPOINT autopoint_1", "ROLLBACK", "bar"]
   end
 
   it "should raise an error if you attempt to use after_commit inside a savepoint in a prepared transaction" do
@@ -2002,6 +2073,18 @@ describe "Database#typecast_value" do
     proc{@db.typecast_value(:datetime, 4)}.must_raise(Sequel::InvalidValue)
   end
 
+  it "should raise an InvalidValue when given an invalid timezone value" do
+    begin
+      Sequel.default_timezone = :blah
+      proc{@db.typecast_value(:datetime, [2019, 2, 3, 4, 5, 6])}.must_raise(Sequel::InvalidValue)
+      Sequel.datetime_class = DateTime
+      proc{@db.typecast_value(:datetime, [2019, 2, 3, 4, 5, 6])}.must_raise(Sequel::InvalidValue)
+    ensure
+      Sequel.default_timezone = nil
+      Sequel.datetime_class = Time
+    end
+  end
+
   it "should handle integers with leading 0 as base 10" do
     @db.typecast_value(:integer, "013").must_equal 13
     @db.typecast_value(:integer, "08").must_equal 8
@@ -2246,6 +2329,17 @@ describe "Database#typecast_value" do
       @db.typecast_value(:datetime, 'year'=>2011, 'month'=>10, 'day'=>11, 'hour'=>12, 'minute'=>13, 'second'=>14).must_equal Time.local(2011, 10, 11, 12, 13, 14)
       @db.typecast_value(:datetime, 'year'=>2011, 'month'=>10, 'day'=>11, 'hour'=>12, 'minute'=>13, 'second'=>14, 'nanos'=>500000000).must_equal Time.local(2011, 10, 11, 12, 13, 14, 500000)
 
+      @db.typecast_value(:datetime, :year=>2011, :month=>10, :day=>11, :hour=>12, :minute=>13, :second=>14, :offset=>Rational(1, 2)).must_equal Time.new(2011, 10, 11, 12, 13, 14, 43200)
+      @db.typecast_value(:datetime, :year=>2011, :month=>10, :day=>11, :hour=>12, :minute=>13, :second=>14, :nanos=>500000000, :offset=>Rational(1, 2)).must_equal Time.new(2011, 10, 11, 12, 13, 14.5, 43200)
+      @db.typecast_value(:datetime, 'year'=>2011, 'month'=>10, 'day'=>11, 'hour'=>12, 'minute'=>13, 'second'=>14, 'offset'=>Rational(1, 2)).must_equal Time.new(2011, 10, 11, 12, 13, 14, 43200)
+      @db.typecast_value(:datetime, 'year'=>2011, 'month'=>10, 'day'=>11, 'hour'=>12, 'minute'=>13, 'second'=>14, 'nanos'=>500000000, 'offset'=>Rational(1, 2)).must_equal Time.new(2011, 10, 11, 12, 13, 14.5, 43200)
+
+      Sequel.default_timezone = :utc
+      @db.typecast_value(:datetime, :year=>2011, :month=>10, :day=>11, :hour=>12, :minute=>13, :second=>14).must_equal Time.utc(2011, 10, 11, 12, 13, 14)
+      @db.typecast_value(:datetime, :year=>2011, :month=>10, :day=>11, :hour=>12, :minute=>13, :second=>14, :nanos=>500000000).must_equal Time.utc(2011, 10, 11, 12, 13, 14, 500000)
+      @db.typecast_value(:datetime, 'year'=>2011, 'month'=>10, 'day'=>11, 'hour'=>12, 'minute'=>13, 'second'=>14).must_equal Time.utc(2011, 10, 11, 12, 13, 14)
+      @db.typecast_value(:datetime, 'year'=>2011, 'month'=>10, 'day'=>11, 'hour'=>12, 'minute'=>13, 'second'=>14, 'nanos'=>500000000).must_equal Time.utc(2011, 10, 11, 12, 13, 14, 500000)
+
       Sequel.datetime_class = DateTime
       @db.typecast_value(:datetime, :year=>2011, :month=>10, :day=>11, :hour=>12, :minute=>13, :second=>14).must_equal DateTime.civil(2011, 10, 11, 12, 13, 14)
       @db.typecast_value(:datetime, :year=>2011, :month=>10, :day=>11, :hour=>12, :minute=>13, :second=>14, :nanos=>500000000).must_equal DateTime.civil(2011, 10, 11, 12, 13, Rational(29, 2))
@@ -2255,8 +2349,16 @@ describe "Database#typecast_value" do
       @db.typecast_value(:datetime, :year=>2011, :month=>10, :day=>11, :hour=>12, :minute=>13, :second=>14, :nanos=>500000000, :offset=>Rational(1, 2)).must_equal DateTime.civil(2011, 10, 11, 12, 13, Rational(29, 2), Rational(1, 2))
       @db.typecast_value(:datetime, 'year'=>2011, 'month'=>10, 'day'=>11, 'hour'=>12, 'minute'=>13, 'second'=>14, 'offset'=>Rational(1, 2)).must_equal DateTime.civil(2011, 10, 11, 12, 13, 14, Rational(1, 2))
       @db.typecast_value(:datetime, 'year'=>2011, 'month'=>10, 'day'=>11, 'hour'=>12, 'minute'=>13, 'second'=>14, 'nanos'=>500000000, 'offset'=>Rational(1, 2)).must_equal DateTime.civil(2011, 10, 11, 12, 13, Rational(29, 2), Rational(1, 2))
+
+      Sequel.default_timezone = :local
+      offset = Rational(Time.local(2011, 10, 11, 12, 13, 14).utc_offset, 86400)
+      @db.typecast_value(:datetime, :year=>2011, :month=>10, :day=>11, :hour=>12, :minute=>13, :second=>14).must_equal DateTime.civil(2011, 10, 11, 12, 13, 14, offset)
+      @db.typecast_value(:datetime, :year=>2011, :month=>10, :day=>11, :hour=>12, :minute=>13, :second=>14, :nanos=>500000000).must_equal DateTime.civil(2011, 10, 11, 12, 13, Rational(29, 2), offset)
+      @db.typecast_value(:datetime, 'year'=>2011, 'month'=>10, 'day'=>11, 'hour'=>12, 'minute'=>13, 'second'=>14).must_equal DateTime.civil(2011, 10, 11, 12, 13, 14, offset)
+      @db.typecast_value(:datetime, 'year'=>2011, 'month'=>10, 'day'=>11, 'hour'=>12, 'minute'=>13, 'second'=>14, 'nanos'=>500000000).must_equal DateTime.civil(2011, 10, 11, 12, 13, Rational(29, 2), offset)
     ensure
       Sequel.datetime_class = Time
+      Sequel.default_timezone = nil
     end
   end
 
@@ -2681,10 +2783,11 @@ describe "Database extensions" do
     x = []
     Sequel::Database.register_extension(:a, Module.new{define_singleton_method(:extended){|_| x << :a}})
     Sequel::Database.register_extension(:b, Module.new{define_singleton_method(:extended){|_| x << :b}})
+    m = Mutex.new
     c = Class.new(Sequel::Database) do
       def dataset_class_default; Sequel::Dataset end
       define_method(:connect) do |_|
-        x << :c
+        m.synchronize{x << :c}
         :connect
       end
     end

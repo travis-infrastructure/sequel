@@ -1020,6 +1020,11 @@ module Sequel
       include SQL::AliasMethods
       include SQL::CastMethods
 
+      class << self
+        # Alias new to call for usage in conversion procs
+        alias call new
+      end
+
       # Return a LiteralString with the same content if no args are given, otherwise
       # return a SQL::PlaceholderLiteralString with the current string and the given args.
       def lit(*args)
@@ -1081,11 +1086,23 @@ module Sequel
       def self.from_value_pair(l, r)
         case r
         when Range
-          expr = new(:>=, l, r.begin)
-          unless r.end.nil?
-            expr = new(:AND, expr, new(r.exclude_end? ? :< : :<=, l, r.end))
+          unless r.begin.nil?
+            begin_expr = new(:>=, l, r.begin)
           end
-          expr
+          unless r.end.nil?
+            end_expr = new(r.exclude_end? ? :< : :<=, l, r.end)
+          end
+          if begin_expr
+            if end_expr
+              new(:AND, begin_expr, end_expr)
+            else
+              begin_expr
+            end
+          elsif end_expr
+            end_expr
+          else
+            new(:'=', 1, 1)
+          end
         when ::Array
           r = r.dup.freeze unless r.frozen?
           new(:IN, l, r)
@@ -1467,7 +1484,7 @@ module Sequel
 
       # Return a new function call with the given opts merged into the current opts.
       def with_opts(opts)
-        self.class.new!(name, args, Hash[@opts].merge!(opts))
+        self.class.new!(name, args, @opts.merge(opts))
       end
     end
 

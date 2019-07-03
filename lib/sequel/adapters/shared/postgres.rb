@@ -23,43 +23,47 @@ module Sequel
     PLUS_INFINITY   = 1.0/0.0
     MINUS_INFINITY  = -1.0/0.0
 
-    TYPE_TRANSLATOR = tt = Class.new do
-      def boolean(s) s == 't' end
-      def integer(s) s.to_i end
-      def float(s) 
-        case s
-        when 'NaN'
-          NAN
-        when 'Infinity'
-          PLUS_INFINITY
-        when '-Infinity'
-          MINUS_INFINITY
-        else
-          s.to_f 
-        end
+    boolean = Object.new
+    def boolean.call(s) s == 't' end
+    integer = Object.new
+    def integer.call(s) s.to_i end
+    float = Object.new
+    def float.call(s) 
+      case s
+      when 'NaN'
+        NAN
+      when 'Infinity'
+        PLUS_INFINITY
+      when '-Infinity'
+        MINUS_INFINITY
+      else
+        s.to_f 
       end
-      def date(s) ::Date.new(*s.split('-').map(&:to_i)) end
-      def bytea(str)
-        str = if str =~ /\A\\x/
-          # PostgreSQL 9.0+ bytea hex format
-          str[2..-1].gsub(/(..)/){|s| s.to_i(16).chr}
-        else
-          # Historical PostgreSQL bytea escape format
-          str.gsub(/\\(\\|'|[0-3][0-7][0-7])/) {|s|
-            if s.size == 2 then s[1,1] else s[1,3].oct.chr end
-          }
-        end
-        ::Sequel::SQL::Blob.new(str)
+    end
+    date = Object.new
+    def date.call(s) ::Date.new(*s.split('-').map(&:to_i)) end
+    TYPE_TRANSLATOR_DATE = date.freeze
+    bytea = Object.new
+    def bytea.call(str)
+      str = if str =~ /\A\\x/
+        # PostgreSQL 9.0+ bytea hex format
+        str[2..-1].gsub(/(..)/){|s| s.to_i(16).chr}
+      else
+        # Historical PostgreSQL bytea escape format
+        str.gsub(/\\(\\|'|[0-3][0-7][0-7])/) {|s|
+          if s.size == 2 then s[1,1] else s[1,3].oct.chr end
+        }
       end
-    end.new.freeze
+      ::Sequel::SQL::Blob.new(str)
+    end
 
     CONVERSION_PROCS = {}
 
     {
-      [16] => tt.method(:boolean),
-      [17] => tt.method(:bytea),
-      [20, 21, 23, 26] => tt.method(:integer),
-      [700, 701] => tt.method(:float),
+      [16] => boolean,
+      [17] => bytea,
+      [20, 21, 23, 26] => integer,
+      [700, 701] => float,
       [1700] => ::Kernel.method(:BigDecimal),
       [1083, 1266] => ::Sequel.method(:string_to_time),
       [1082] => ::Sequel.method(:string_to_date),
@@ -143,10 +147,10 @@ module Sequel
       SELECT_CUSTOM_SEQUENCE_SQL = (<<-end_sql
         SELECT name.nspname AS "schema",
             CASE
-            WHEN split_part(def.adsrc, '''', 2) ~ '.' THEN
-              substr(split_part(def.adsrc, '''', 2),
-                     strpos(split_part(def.adsrc, '''', 2), '.')+1)
-            ELSE split_part(def.adsrc, '''', 2)
+            WHEN split_part(pg_get_expr(def.adbin, attr.attrelid), '''', 2) ~ '.' THEN
+              substr(split_part(pg_get_expr(def.adbin, attr.attrelid), '''', 2),
+                     strpos(split_part(pg_get_expr(def.adbin, attr.attrelid), '''', 2), '.')+1)
+            ELSE split_part(pg_get_expr(def.adbin, attr.attrelid), '''', 2)
           END AS "sequence"
         FROM pg_class t
         JOIN pg_namespace  name ON (t.relnamespace = name.oid)
@@ -154,7 +158,7 @@ module Sequel
         JOIN pg_attrdef    def  ON (adrelid = attrelid AND adnum = attnum)
         JOIN pg_constraint cons ON (conrelid = adrelid AND adnum = conkey[1])
         WHERE cons.contype = 'p'
-          AND def.adsrc ~* 'nextval'
+          AND pg_get_expr(def.adbin, attr.attrelid) ~* 'nextval'
       end_sql
       ).strip.gsub(/\s+/, ' ').freeze
 
@@ -216,24 +220,22 @@ module Sequel
       # A hash of metadata for CHECK constraints on the table.
       # Keys are CHECK constraint name symbols.  Values are hashes with the following keys:
       # :definition :: An SQL fragment for the definition of the constraint
-      # :columns :: An array of column symbols for the columns referenced in the constraint
+      # :columns :: An array of column symbols for the columns referenced in the constraint,
+      #             can be an empty array if the database cannot deteremine the column symbols.
       def check_constraints(table)
         m = output_identifier_meth
 
         rows = metadata_dataset.
           from{pg_constraint.as(:co)}.
-          join(Sequel[:pg_attribute].as(:att), :attrelid=>:conrelid, :attnum=>SQL::Function.new(:ANY, Sequel[:co][:conkey])).
+          left_join(Sequel[:pg_attribute].as(:att), :attrelid=>:conrelid, :attnum=>SQL::Function.new(:ANY, Sequel[:co][:conkey])).
           where(:conrelid=>regclass_oid(table), :contype=>'c').
           select{[co[:conname].as(:constraint), att[:attname].as(:column), pg_get_constraintdef(co[:oid]).as(:definition)]}
 
         hash = {}
         rows.each do |row|
           constraint = m.call(row[:constraint])
-          if entry = hash[constraint]
-            entry[:columns] << m.call(row[:column])
-          else
-            hash[constraint] = {:definition=>row[:definition], :columns=>[m.call(row[:column])]}
-          end
+          entry = hash[constraint] ||= {:definition=>row[:definition], :columns=>[]}
+          entry[:columns] << m.call(row[:column]) if row[:column]
         end
         
         hash
@@ -1729,7 +1731,9 @@ module Sequel
       def _import(columns, values, opts=OPTS)
         if @opts[:returning]
           statements = multi_insert_sql(columns, values)
-          @db.transaction(Hash[opts].merge!(:server=>@opts[:server])) do
+          trans_opts = Hash[opts]
+          trans_opts[:server] = @opts[:server]
+          @db.transaction(trans_opts) do
             statements.map{|st| returning_fetch_rows(st)}
           end.first.map{|v| v.length == 1 ? v.values.first : v}
         elsif opts[:return] == :primary_key
@@ -1914,6 +1918,18 @@ module Sequel
       # Use WITH RECURSIVE instead of WITH if any of the CTEs is recursive
       def select_with_sql_base
         opts[:with].any?{|w| w[:recursive]} ? "WITH RECURSIVE " : super
+      end
+
+      # Support WITH AS [NOT] MATERIALIZED if :materialized option is used.
+      def select_with_sql_prefix(sql, w)
+        super
+
+        case w[:materialized]
+        when true
+          sql << "MATERIALIZED "
+        when false
+          sql << "NOT MATERIALIZED "
+        end
       end
 
       # The version of the database server

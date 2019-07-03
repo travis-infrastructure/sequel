@@ -16,6 +16,11 @@ require_relative "../../lib/sequel"
 
 require_relative '../deprecation_helper'
 
+if ENV['SEQUEL_TZINFO_VERSION']
+  # Allow forcing specific TZInfo versions, useful when testing
+  gem 'tzinfo', ENV['SEQUEL_TZINFO_VERSION']
+end
+
 begin
   # Attempt to load ActiveSupport blank extension and inflector first, so Sequel
   # can override them.
@@ -26,7 +31,9 @@ rescue LoadError
   nil
 end
 
-Sequel.extension :core_refinements if RUBY_VERSION >= '2.0.0' && RUBY_ENGINE == 'ruby'
+if (RUBY_VERSION >= '2.0.0' && RUBY_ENGINE == 'ruby') || (RUBY_ENGINE == 'jruby' && (JRUBY_VERSION >= '9.3' || (JRUBY_VERSION.match(/\A9\.2\.(\d+)/) && $1.to_i >= 7)))
+  Sequel.extension :core_refinements
+end
 
 class << Sequel::Model
   attr_writer :db_schema
@@ -60,3 +67,4 @@ end
 if ENV['SEQUEL_NO_CACHE_ASSOCIATIONS']
   Sequel::Model.cache_associations = false
 end
+Sequel::Model.plugin :throw_failures if ENV['SEQUEL_MODEL_THROW_FAILURES']

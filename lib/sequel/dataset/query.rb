@@ -1062,6 +1062,10 @@ module Sequel
     # :args :: Specify the arguments/columns for the CTE, should be an array of symbols.
     # :recursive :: Specify that this is a recursive CTE
     #
+    # PostgreSQL Specific Options:
+    # :materialized :: Set to false to force inlining of the CTE, or true to force not inlining
+    #                  the CTE (PostgreSQL 12+).
+    #
     #   DB[:items].with(:items, DB[:syx].where(Sequel[:name].like('A%')))
     #   # WITH items AS (SELECT * FROM syx WHERE (name LIKE 'A%' ESCAPE '\')) SELECT * FROM items
     def with(name, dataset, opts=OPTS)
@@ -1091,7 +1095,7 @@ module Sequel
     #   #   SELECT i1.id, i1.parent_id FROM i1 INNER JOIN t ON (t.id = i1.parent_id)
     #   # ) SELECT * FROM t
     def with_recursive(name, nonrecursive, recursive, opts=OPTS)
-      raise(Error, 'This datatset does not support common table expressions') unless supports_cte?
+      raise(Error, 'This dataset does not support common table expressions') unless supports_cte?
       if hoist_cte?(nonrecursive)
         s, ds = hoist_cte(nonrecursive)
         s.with_recursive(name, ds, recursive, opts)

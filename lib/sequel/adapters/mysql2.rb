@@ -78,8 +78,8 @@ module Sequel
       end
 
       # Return the version of the MySQL server to which we are connecting.
-      def server_version(server=nil)
-        @server_version ||= (synchronize(server){|conn| conn.server_info[:id]} || super)
+      def server_version(_server=nil)
+        @server_version ||= super()
       end
 
       private
@@ -245,6 +245,9 @@ module Sequel
       # it hasn't been disabled.
       def paged_each(opts=OPTS, &block)
         if STREAMING_SUPPORTED && opts[:stream] != false
+          unless block_given?
+            return enum_for(:paged_each, opts)
+          end
           stream.each(&block)
         else
           super

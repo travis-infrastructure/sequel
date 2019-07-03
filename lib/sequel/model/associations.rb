@@ -1617,9 +1617,10 @@ module Sequel
         #                is hash or array of two element arrays.  Consider also specifying the :graph_block
         #                option if the value for this option is not a hash or array of two element arrays
         #                and you plan to use this association in eager_graph or association_join.
-        # :dataset :: A proc that is instance_execed to get the base dataset to use (before the other
+        # :dataset :: A proc that is used to define the method to get the base dataset to use (before the other
         #             options are applied).  If the proc accepts an argument, it is passed the related
-        #             association reflection.
+        #             association reflection.  It is a best practice to always have the dataset accept an argument
+        #             and use the argument to return the appropriate dataset.
         # :distinct :: Use the DISTINCT clause when selecting associating object, both when
         #              lazy loading and eager loading via .eager (but not when using .eager_graph).
         # :eager :: The associations to eagerly load via +eager+ when loading the associated object(s).
@@ -1909,7 +1910,7 @@ module Sequel
         # can be easily overridden in the class itself while allowing for
         # super to be called.
         def association_module_def(name, opts=OPTS, &block)
-          association_module(opts).module_eval{define_method(name, &block)}
+          association_module(opts).send(:define_method, name, &block)
         end
       
         # Add a private method to the module included in the class.
@@ -1944,6 +1945,13 @@ module Sequel
           end
 
           association_module_def(opts.dataset_method, opts){_dataset(opts)}
+          if opts[:block]
+            opts[:block_method] = Plugins.def_sequel_method(association_module(opts), "#{opts[:name]}_block", 1, &opts[:block])
+          end
+          if opts[:dataset]
+            opts[:dataset_opt_arity] = opts[:dataset].arity == 0 ? 0 : 1
+            opts[:dataset_opt_method] = Plugins.def_sequel_method(association_module(opts), "#{opts[:name]}_dataset_opt", opts[:dataset_opt_arity], &opts[:dataset])
+          end
           def_association_method(opts)
 
           return if opts[:read_only]
@@ -2129,7 +2137,7 @@ module Sequel
           graph_cks = opts[:graph_keys]
           opts[:eager_grapher] ||= proc do |eo|
             ds = eo[:self]
-            ds.graph(eager_graph_dataset(opts, eo), use_only_conditions ? only_conditions : opts.primary_keys.zip(graph_cks) + conditions, Hash[eo].merge!(:select=>select, :join_type=>eo[:join_type]||join_type, :qualify=>:deep, :from_self_alias=>eo[:from_self_alias]), &graph_block)
+            ds.graph(eager_graph_dataset(opts, eo), use_only_conditions ? only_conditions : opts.primary_keys.zip(graph_cks) + conditions, eo.merge(:select=>select, :join_type=>eo[:join_type]||join_type, :qualify=>:deep), &graph_block)
           end
       
           return if opts[:read_only]
@@ -2189,7 +2197,7 @@ module Sequel
           graph_block = opts[:graph_block]
           opts[:eager_grapher] ||= proc do |eo|
             ds = eo[:self]
-            ds = ds.graph(opts.apply_eager_graph_limit_strategy(eo[:limit_strategy], eager_graph_dataset(opts, eo)), use_only_conditions ? only_conditions : cks.zip(pkcs) + conditions, Hash[eo].merge!(:select=>select, :join_type=>eo[:join_type]||join_type, :qualify=>:deep, :from_self_alias=>eo[:from_self_alias]), &graph_block)
+            ds = ds.graph(opts.apply_eager_graph_limit_strategy(eo[:limit_strategy], eager_graph_dataset(opts, eo)), use_only_conditions ? only_conditions : cks.zip(pkcs) + conditions, eo.merge(:select=>select, :join_type=>eo[:join_type]||join_type, :qualify=>:deep), &graph_block)
             # We only load reciprocals for one_to_many associations, as other reciprocals don't make sense
             ds.opts[:eager_graph][:reciprocals][eo[:table_alias]] = opts.reciprocal
             ds
@@ -2204,12 +2212,28 @@ module Sequel
           if one_to_one
             opts[:setter] ||= proc do |o|
               up_ds = _apply_association_options(opts, opts.associated_dataset.where(cks.zip(cpks.map{|k| get_column_value(k)})))
+
+              if (froms = up_ds.opts[:from]) && (from = froms[0]) && (from.is_a?(Sequel::Dataset) || (from.is_a?(Sequel::SQL::AliasedExpression) && from.expression.is_a?(Sequel::Dataset)))
+                if old = up_ds.first
+                  cks.each{|k| old.set_column_value(:"#{k}=", nil)}
+                end
+                save_old = true
+              end
+
               if o
-                up_ds = up_ds.exclude(o.pk_hash) unless o.new?
+                if !o.new? && !save_old
+                  up_ds = up_ds.exclude(o.pk_hash)
+                end
                 cks.zip(cpks).each{|k, pk| o.set_column_value(:"#{k}=", get_column_value(pk))}
               end
+
               checked_transaction do
-                up_ds.skip_limit_check.update(ck_nil_hash)
+                if save_old
+                  old.save(save_opts) || raise(Sequel::Error, "invalid previously associated object, cannot save") if old
+                else
+                  up_ds.skip_limit_check.update(ck_nil_hash)
+                end
+
                 o.save(save_opts) || raise(Sequel::Error, "invalid associated object, cannot save") if o
               end
             end
@@ -2287,7 +2311,8 @@ module Sequel
           end
           ds = ds.clone(:model_object => self)
           ds = ds.eager_graph(opts[:eager_graph]) if opts[:eager_graph] && opts.eager_graph_lazy_dataset?
-          ds = instance_exec(ds, &opts[:block]) if opts[:block]
+          # block method is private
+          ds = send(opts[:block_method], ds) if opts[:block_method]
           ds
         end
 
@@ -2310,10 +2335,11 @@ module Sequel
         # Return an association dataset for the given association reflection
         def _dataset(opts)
           raise(Sequel::Error, "model object #{inspect} does not have a primary key") if opts.dataset_need_primary_key? && !pk
-          ds = if opts[:dataset].arity == 1
-            instance_exec(opts, &opts[:dataset])
+          ds = if opts[:dataset_opt_arity] == 1
+            # dataset_opt_method is private
+            send(opts[:dataset_opt_method], opts)
           else
-            instance_exec(&opts[:dataset])
+            send(opts[:dataset_opt_method])
           end
           _apply_association_options(opts, ds)
         end
@@ -2908,7 +2934,7 @@ module Sequel
         def eager(*associations)
           opts = @opts[:eager]
           association_opts = eager_options_for_associations(associations)
-          opts = opts ? Hash[opts].merge!(association_opts) : association_opts
+          opts = opts ? opts.merge(association_opts) : association_opts
           clone(:eager=>opts.freeze)
         end
 

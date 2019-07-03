@@ -70,10 +70,21 @@ module Sequel
     #
     # Then you can do:
     #
-    #   artist.update_fields(params['artist'], %w'name albums_artists')
+    #   artist.update_fields(params['artist'], %w'name albums_attributes')
+    #
+    # Note that Rails 5+ does not use a Hash for submitted parameters, and therefore
+    # the above will not work.  With Rails 5+, you have to use:
+    #
+    #   artist.update_fields(params.to_unsafe_h['artist'], %w'name albums_attributes')
     #
     # To save changes to the artist, create the first album and associate it to the artist,
     # and update the other existing associated album.
+    #
+    # You can pass options for individual nested attributes, which will override the default
+    # nested attributes options for that association.  This is useful for per-call filtering
+    # of the allowed fields:
+    #
+    #   a.set_nested_attributes(:albums, params['artist'], :fields=>%w'name')
     module NestedAttributes
       # Depend on the validate_associated plugin.
       def self.apply(model)
@@ -144,7 +155,7 @@ module Sequel
         def set_nested_attributes(assoc, obj, opts=OPTS)
           raise(Error, "no association named #{assoc} for #{model.inspect}") unless ref = model.association_reflection(assoc)
           raise(Error, "nested attributes are not enabled for association #{assoc} for #{model.inspect}") unless meta = ref[:nested_attributes]
-          meta = Hash[meta].merge!(opts)
+          meta = meta.merge(opts)
           meta[:reflection] = ref
           if ref.returns_array?
             nested_attributes_list_setter(meta, obj)

@@ -5,73 +5,82 @@ require_relative 'shared/sqlite'
 
 module Sequel
   module SQLite
-    FALSE_VALUES = (%w'0 false f no n' + [0]).freeze
+    FALSE_VALUES = (%w'0 false f no n'.each(&:freeze) + [0]).freeze
 
-    tt = Class.new do
-      def blob(s)
-        Sequel::SQL::Blob.new(s.to_s)
-      end
+    blob = Object.new
+    def blob.call(s)
+      Sequel::SQL::Blob.new(s.to_s)
+    end
 
-      def boolean(s)
-        s = s.downcase if s.is_a?(String)
-        !FALSE_VALUES.include?(s)
-      end
+    boolean = Object.new
+    def boolean.call(s)
+      s = s.downcase if s.is_a?(String)
+      !FALSE_VALUES.include?(s)
+    end
 
-      def date(s)
-        case s
-        when String
-          Sequel.string_to_date(s)
-        when Integer
-          Date.jd(s)
-        when Float
-          Date.jd(s.to_i)
-        else
-          raise Sequel::Error, "unhandled type when converting to date: #{s.inspect} (#{s.class.inspect})"
-        end
+    date = Object.new
+    def date.call(s)
+      case s
+      when String
+        Sequel.string_to_date(s)
+      when Integer
+        Date.jd(s)
+      when Float
+        Date.jd(s.to_i)
+      else
+        raise Sequel::Error, "unhandled type when converting to date: #{s.inspect} (#{s.class.inspect})"
       end
+    end
 
-      def integer(s)
-        s.to_i
-      end
+    integer = Object.new
+    def integer.call(s)
+      s.to_i
+    end
 
-      def float(s)
-        s.to_f
-      end
+    float = Object.new
+    def float.call(s)
+      s.to_f
+    end
 
-      def numeric(s)
-        s = s.to_s unless s.is_a?(String)
-        BigDecimal(s) rescue s
-      end
+    numeric = Object.new
+    def numeric.call(s)
+      s = s.to_s unless s.is_a?(String)
+      BigDecimal(s) rescue s
+    end
 
-      def time(s)
-        case s
-        when String
-          Sequel.string_to_time(s)
-        when Integer
-          Sequel::SQLTime.create(s/3600, (s % 3600)/60, s % 60)
-        when Float
-          s, f = s.divmod(1)
-          Sequel::SQLTime.create(s/3600, (s % 3600)/60, s % 60, (f*1000000).round)
-        else
-          raise Sequel::Error, "unhandled type when converting to date: #{s.inspect} (#{s.class.inspect})"
-        end
+    time = Object.new
+    def time.call(s)
+      case s
+      when String
+        Sequel.string_to_time(s)
+      when Integer
+        Sequel::SQLTime.create(s/3600, (s % 3600)/60, s % 60)
+      when Float
+        s, f = s.divmod(1)
+        Sequel::SQLTime.create(s/3600, (s % 3600)/60, s % 60, (f*1000000).round)
+      else
+        raise Sequel::Error, "unhandled type when converting to date: #{s.inspect} (#{s.class.inspect})"
       end
-    end.new
+    end
 
     # Hash with string keys and callable values for converting SQLite types.
     SQLITE_TYPES = {}
     {
-      %w'date' => tt.method(:date),
-      %w'time' => tt.method(:time),
-      %w'bit bool boolean' => tt.method(:boolean),
-      %w'integer smallint mediumint int bigint' => tt.method(:integer),
-      %w'numeric decimal money' => tt.method(:numeric),
-      %w'float double real dec fixed' + ['double precision'] => tt.method(:float),
-      %w'blob' => tt.method(:blob)
+      %w'date' => date,
+      %w'time' => time,
+      %w'bit bool boolean' => boolean,
+      %w'integer smallint mediumint int bigint' => integer,
+      %w'numeric decimal money' => numeric,
+      %w'float double real dec fixed' + ['double precision'] => float,
+      %w'blob' => blob
     }.each do |k,v|
       k.each{|n| SQLITE_TYPES[n] = v}
     end
     SQLITE_TYPES.freeze
+
+    sqlite_version = SQLite3::VERSION.split('.').map(&:to_i)[0..1]
+    sqlite_version = sqlite_version[0] * 100 + sqlite_version[1]
+    USE_EXTENDED_RESULT_CODES = sqlite_version >= 104
     
     class Database < Sequel::Database
       include ::Sequel::SQLite::DatabaseMethods
@@ -103,7 +112,11 @@ module Sequel
         sqlite3_opts = {}
         sqlite3_opts[:readonly] = typecast_value_boolean(opts[:readonly]) if opts.has_key?(:readonly)
         db = ::SQLite3::Database.new(opts[:database].to_s, sqlite3_opts)
-        db.busy_timeout(opts.fetch(:timeout, 5000))
+        db.busy_timeout(typecast_value_integer(opts.fetch(:timeout, 5000)))
+
+        if USE_EXTENDED_RESULT_CODES
+          db.extended_result_codes = true
+        end
         
         connection_pragmas.each{|s| log_connection_yield(s, db){db.execute_batch(s)}}
         
@@ -274,13 +287,12 @@ module Sequel
         Dataset
       end
 
-      # Support SQLite exception codes if ruby-sqlite3 supports them.
-      # This is disabled by default because ruby-sqlite3 doesn't currently
-      # support them (returning nil), and even if it did, it doesn't support
-      # extended error codes, which would lead to worse behavior.
-      #def sqlite_error_code(exception)
-      #  exception.code if exception.respond_to?(:code)
-      #end
+      if USE_EXTENDED_RESULT_CODES
+        # Support SQLite exception codes if ruby-sqlite3 supports them.
+        def sqlite_error_code(exception)
+          exception.code if exception.respond_to?(:code)
+        end
+      end
     end
     
     class Dataset < Sequel::Dataset
@@ -313,15 +325,18 @@ module Sequel
 
       def fetch_rows(sql)
         execute(sql) do |result|
-          i = -1
           cps = db.conversion_procs
           type_procs = result.types.map{|t| cps[base_type_name(t)]}
-          cols = result.columns.map{|c| i+=1; [output_identifier(c), i, type_procs[i]]}
+          j = -1
+          cols = result.columns.map{|c| [output_identifier(c), type_procs[(j+=1)]]}
           self.columns = cols.map(&:first)
+          max = cols.length
           result.each do |values|
             row = {}
-            cols.each do |name,id,type_proc|
-              v = values[id]
+            i = -1
+            while (i += 1) < max
+              name, type_proc = cols[i]
+              v = values[i]
               if type_proc && v
                 v = type_proc.call(v)
               end

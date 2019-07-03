@@ -150,6 +150,10 @@ describe "Simple Dataset operations" do
     end
 
     rows = []
+    @ds.order(:number).limit(50, 25).paged_each(:rows_per_fetch=>3).each{|row| rows << row}
+    rows.must_equal((26..75).map{|i| {:id=>i, :number=>i*10}})
+
+    rows = []
     @ds.order(:number).limit(50, 25).paged_each(:rows_per_fetch=>3){|row| rows << row}
     rows.must_equal((26..75).map{|i| {:id=>i, :number=>i*10}})
 
@@ -953,7 +957,7 @@ if DB.dataset.supports_window_functions?
           must_equal [{:sum=>110, :id=>1}, {:sum=>1100, :id=>2}, {:sum=>11000, :id=>3}, {:sum=>110000, :id=>4}, {:sum=>100000, :id=>5}, {:sum=>nil, :id=>6}]
       end
 
-      cspecify "should give correct results for aggregate window functions with offsets for RANGES", :mssql, :sqlite, [proc{DB.server_version < 110000}, :postgres] do
+      cspecify "should give correct results for aggregate window functions with offsets for RANGES", :mssql, [proc{DB.sqlite_version < 32800}, :sqlite], [proc{DB.server_version < 110000}, :postgres] do
         @ds.select(:id){sum(:amount).over(:order=>:group_id, :frame=>{:type=>:range, :start=>1}).as(:sum)}.all.
           must_equal [{:sum=>111, :id=>1}, {:sum=>111, :id=>2}, {:sum=>111, :id=>3}, {:sum=>111111, :id=>4}, {:sum=>111111, :id=>5}, {:sum=>111111, :id=>6}]
         @ds.select(:id){sum(:amount).over(:order=>:group_id, :frame=>{:type=>:range, :start=>0, :end=>1}).as(:sum)}.all.
@@ -1105,6 +1109,12 @@ describe "Sequel::Dataset#import and #multi_insert :return=>:primary_key " do
     @ds.order(:id).map([:id, :i]).must_equal [[1, 10], [2, 20], [3, 30], [4, 40], [5, 50], [6, 60]]
   end
 
+  it "should handle dataset with row_proc" do
+    ds = @ds.with_row_proc(lambda{|h| Object.new})
+    ds.multi_insert([{:i=>10}, {:i=>20}, {:i=>30}], :return=>:primary_key).must_equal [1, 2, 3]
+    ds.import([:i], [[40], [50], [60]], :return=>:primary_key).must_equal [4, 5, 6]
+  end
+  
   it "should return primary key values when :slice is used" do
     @ds.multi_insert([{:i=>10}, {:i=>20}, {:i=>30}], :return=>:primary_key, :slice=>2).must_equal [1, 2, 3]
     @ds.import([:i], [[40], [50], [60]], :return=>:primary_key, :slice=>2).must_equal [4, 5, 6]
@@ -1541,15 +1551,25 @@ describe "Sequel::Dataset DSL support" do
     @ds.exclude(:a=>[20, 10]).all.must_equal []
   end
   
-  it "should work with ranges as hash values" do
+  it "should work with endless ranges as hash values" do
     @ds.insert(20, 10)
-    @ds.filter(:a=>(10..30)).all.must_equal [{:a=>20, :b=>10}]
-    @ds.filter(:a=>(25..30)).all.must_equal []
-    @ds.filter(:a=>(10..15)).all.must_equal []
-    @ds.exclude(:a=>(10..30)).all.must_equal []
-    @ds.exclude(:a=>(25..30)).all.must_equal [{:a=>20, :b=>10}]
-    @ds.exclude(:a=>(10..15)).all.must_equal [{:a=>20, :b=>10}]
-  end
+    @ds.filter(:a=>eval('30..')).all.must_equal []
+    @ds.filter(:a=>eval('20...')).all.must_equal [{:a=>20, :b=>10}]
+    @ds.filter(:a=>eval('20..')).all.must_equal [{:a=>20, :b=>10}]
+    @ds.filter(:a=>eval('10..')).all.must_equal [{:a=>20, :b=>10}]
+  end if RUBY_VERSION >= '2.6'
+  
+  it "should work with startless ranges as hash values" do
+    @ds.insert(20, 10)
+    @ds.filter(:a=>eval('..30')).all.must_equal [{:a=>20, :b=>10}]
+    @ds.filter(:a=>eval('...30')).all.must_equal [{:a=>20, :b=>10}]
+    @ds.filter(:a=>eval('..20')).all.must_equal [{:a=>20, :b=>10}]
+    @ds.filter(:a=>eval('...20')).all.must_equal []
+    @ds.filter(:a=>eval('..10')).all.must_equal []
+    @ds.filter(:a=>eval('...10')).all.must_equal []
+
+    @ds.filter(:a=>eval('nil..nil')).all.must_equal [{:a=>20, :b=>10}]
+  end if RUBY_VERSION >= '2.7'
   
   it "should work with CASE statements" do
     @ds.insert(20, 10)

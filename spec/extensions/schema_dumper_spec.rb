@@ -800,14 +800,16 @@ END_MIG
   it "should convert mysql types to ruby types" do
     def @d.schema(t, *o)
       i = 0
-      ['double(15,2)', 'double(7,1) unsigned'].map{|x| [:"c#{i+=1}", {:db_type=>x, :allow_null=>true}]}
+      ['float unsigned', 'double(15,2)', 'double(7,1) unsigned'].map{|x| [:"c#{i+=1}", {:db_type=>x, :allow_null=>true}]}
     end
     @d.dump_table_schema(:x).must_equal((<<END_MIG).chomp)
 create_table(:x) do
   Float :c1
   Float :c2
+  Float :c3
   
-  check Sequel::SQL::BooleanExpression.new(:>=, Sequel::SQL::Identifier.new(:c2), 0)
+  check Sequel::SQL::BooleanExpression.new(:>=, Sequel::SQL::Identifier.new(:c1), 0)
+  check Sequel::SQL::BooleanExpression.new(:>=, Sequel::SQL::Identifier.new(:c3), 0)
 end
 END_MIG
   end
