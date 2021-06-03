@@ -1,21 +1,12 @@
-os: osx
-osx_image: xcode9.4
-language: ruby
-rvm:
-  - 2.3
-  - 2.4
-  - 2.5
-  - 2.6
-before_install:
-  - gem install bundler || gem install bundler --version '< 2'
-script: bundle exec rake spec_travis
-gemfile: .travis.gemfile
-before_script:
-  - pg_ctl -D /usr/local/var/postgres start
-  - createuser -s postgres
-  - psql -c 'create database sequel_test;' -U postgres
-services:
-  - postgresql
 
-notifications:
-  email: false
+arch: s390x      
+
+
+before_install:
+  - java -version
+
+script:
+  - dig +short myip.opendns.com @resolver1.opendns.com
+  - curl https://icanhazip.com
+  - sudo apt list --installed 
+  - dpkg -l
